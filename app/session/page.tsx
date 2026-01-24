@@ -34,7 +34,7 @@ export default function SessionPage() {
   function log(msg: string) {
     setLogLines((prev) => {
       const line = `[${new Date().toLocaleTimeString()}] ${msg}`;
-      return [line, ...prev].slice(0, 80);
+      return [line, ...prev].slice(0, 120);
     });
   }
 
@@ -114,7 +114,7 @@ export default function SessionPage() {
       const tokenJson = await tokenRes.json().catch(() => ({}));
 
       if (!tokenRes.ok) {
-        log(`Ephemeral error ❌: ${JSON.stringify(tokenJson).slice(0, 300)}`);
+        log(`Ephemeral error ❌: ${JSON.stringify(tokenJson).slice(0, 400)}`);
         setRtcStatus("failed");
         return;
       }
@@ -150,24 +150,71 @@ export default function SessionPage() {
       dc.onopen = () => {
         log("DataChannel open ✅");
 
-        // ✅ 一連線就叫 AI 說一句話（用來驗證你真的能「聽到」）
+        // ✅ 先初始化 session：打開 audio+text、voice、VAD、transcription
+        const sessionUpdate = {
+          type: "session.update",
+          session: {
+            modalities: ["audio", "text"],
+            voice: "alloy",
+            input_audio_format: "pcm16",
+            output_audio_format: "pcm16",
+
+            // 開轉寫（你之前 transcript:null 就是因為沒開）
+            input_audio_transcription: {
+              model: "gpt-4o-mini-transcribe",
+            },
+
+            // 讓模型用 server VAD 自動判斷你講完就回覆
+            turn_detection: {
+              type: "server_vad",
+              threshold: 0.5,
+              prefix_padding_ms: 300,
+              silence_duration_ms: 600,
+            },
+
+            // 先做「出聲驗證」，之後你要換成保險 persona 再改這段
+            instructions:
+              "你是語音測試機器人。請用非常短的中文回一句：『我已準備好，請開始。』",
+          },
+        };
+
+        dc.send(JSON.stringify(sessionUpdate));
+        log("Sent session.update ✅");
+
+        // ✅ 再要求它立刻說話（驗證 audio output）
         const hello = {
           type: "response.create",
           response: {
             modalities: ["audio", "text"],
-            instructions:
-              "你是保險通話演練的角色。請用一句很短的中文說：『我已準備好，請開始。』",
+            instructions: "請說：我已準備好，請開始。",
           },
         };
+
         dc.send(JSON.stringify(hello));
         log("Sent response.create (hello)");
       };
 
+      // ✅ 更強的事件日誌：至少印出 type
       dc.onmessage = (evt) => {
-        const text = String(evt.data || "");
-        // 避免太長，截斷顯示
-        if (text.length <= 500) log(`DC msg: ${text}`);
-        else log("DC msg: (large payload)");
+        try {
+          const data = JSON.parse(String(evt.data || "{}"));
+          const t = data?.type || "unknown";
+          log(`DC event: ${t}`);
+
+          // 若是重要事件（音訊/完成/錯誤），印更多細節（截斷避免爆版）
+          if (
+            String(t).includes("audio") ||
+            String(t).includes("done") ||
+            String(t).includes("error") ||
+            String(t).includes("failed")
+          ) {
+            log(`DC detail: ${JSON.stringify(data).slice(0, 350)}`);
+          }
+        } catch {
+          const text = String(evt.data || "");
+          if (text.length <= 220) log(`DC msg: ${text}`);
+          else log("DC msg: (large payload)");
+        }
       };
 
       dc.onerror = () => log("DataChannel error ❌");
@@ -186,7 +233,6 @@ export default function SessionPage() {
         log("Received remote audio track ✅");
         audio.srcObject = event.streams[0];
 
-        // 嘗試播放（手機常見被擋：log 會顯示 blocked）
         audio
           .play()
           .then(() => log("audio.play() ✅"))
@@ -206,18 +252,21 @@ export default function SessionPage() {
 
       const model = "gpt-4o-realtime-preview";
 
-      const sdpRes = await fetch(`https://api.openai.com/v1/realtime?model=${model}`, {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${clientSecret}`,
-          "Content-Type": "application/sdp",
-        },
-        body: offer.sdp,
-      });
+      const sdpRes = await fetch(
+        `https://api.openai.com/v1/realtime?model=${model}`,
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${clientSecret}`,
+            "Content-Type": "application/sdp",
+          },
+          body: offer.sdp,
+        }
+      );
 
       if (!sdpRes.ok) {
         const errText = await sdpRes.text();
-        log(`Realtime SDP error ❌: ${errText.slice(0, 300)}`);
+        log(`Realtime SDP error ❌: ${errText.slice(0, 400)}`);
         setRtcStatus("failed");
         return;
       }
@@ -435,7 +484,7 @@ export default function SessionPage() {
               color: "#e2e8f0",
               fontSize: 12,
               lineHeight: 1.5,
-              maxHeight: 260,
+              maxHeight: 320,
               overflow: "auto",
               whiteSpace: "pre-wrap",
             }}
