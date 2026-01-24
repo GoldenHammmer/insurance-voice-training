@@ -23,6 +23,8 @@ export default function SessionPage() {
   // === WebRTC / Realtime：狀態 ===
   const pcRef = useRef<RTCPeerConnection | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const dcRef = useRef<RTCDataChannel | null>(null);
+
   const [rtcStatus, setRtcStatus] = useState<
     "idle" | "starting" | "connected" | "failed" | "ended"
   >("idle");
@@ -30,7 +32,10 @@ export default function SessionPage() {
   const [hasRemoteAudio, setHasRemoteAudio] = useState(false);
 
   function log(msg: string) {
-    setLogLines((prev) => [`[${new Date().toLocaleTimeString()}] ${msg}`, ...prev].slice(0, 50));
+    setLogLines((prev) => {
+      const line = `[${new Date().toLocaleTimeString()}] ${msg}`;
+      return [line, ...prev].slice(0, 80);
+    });
   }
 
   const nextPrompt = () => {
@@ -67,24 +72,49 @@ export default function SessionPage() {
     log("Mic stopped");
   }
 
-  // === 開始 Realtime WebRTC（可用手機驗證的版本） ===
+  function cleanupRealtime() {
+    try {
+      dcRef.current?.close();
+    } catch {
+      // ignore
+    }
+    dcRef.current = null;
+
+    try {
+      pcRef.current?.close();
+    } catch {
+      // ignore
+    }
+    pcRef.current = null;
+
+    audioRef.current = null;
+    setHasRemoteAudio(false);
+  }
+
+  // === 開始 Realtime WebRTC（手機可驗證） ===
   async function startRealtime() {
     if (!streamRef.current) {
       alert("請先啟用麥克風");
       return;
     }
 
+    // 若之前有殘留連線，先清掉
+    cleanupRealtime();
+
     setRtcStatus("starting");
     setHasRemoteAudio(false);
     log("Starting realtime…");
 
     try {
-      // 1) 拿 ephemeral token（一定要 server 端）
-      const tokenRes = await fetch("/api/session/demo/ephemeral", { method: "POST" });
-      const tokenJson = await tokenRes.json();
+      // 1) 跟自己 server 要 ephemeral token
+      const tokenRes = await fetch("/api/session/demo/ephemeral", {
+        method: "POST",
+      });
+
+      const tokenJson = await tokenRes.json().catch(() => ({}));
 
       if (!tokenRes.ok) {
-        log(`Ephemeral error: ${JSON.stringify(tokenJson).slice(0, 200)}`);
+        log(`Ephemeral error ❌: ${JSON.stringify(tokenJson).slice(0, 300)}`);
         setRtcStatus("failed");
         return;
       }
@@ -113,32 +143,69 @@ export default function SessionPage() {
         log(`pc.iceConnectionState = ${pc.iceConnectionState}`);
       };
 
-      // 3) 接收 AI 回來的 audio track（就算你聽不到，也會有 track event）
+      // 3) DataChannel：用來送控制指令/收事件（關鍵）
+      const dc = pc.createDataChannel("oai-events");
+      dcRef.current = dc;
+
+      dc.onopen = () => {
+        log("DataChannel open ✅");
+
+        // ✅ 一連線就叫 AI 說一句話（用來驗證你真的能「聽到」）
+        const hello = {
+          type: "response.create",
+          response: {
+            modalities: ["audio", "text"],
+            instructions:
+              "你是保險通話演練的角色。請用一句很短的中文說：『我已準備好，請開始。』",
+          },
+        };
+        dc.send(JSON.stringify(hello));
+        log("Sent response.create (hello)");
+      };
+
+      dc.onmessage = (evt) => {
+        const text = String(evt.data || "");
+        // 避免太長，截斷顯示
+        if (text.length <= 500) log(`DC msg: ${text}`);
+        else log("DC msg: (large payload)");
+      };
+
+      dc.onerror = () => log("DataChannel error ❌");
+      dc.onclose = () => log("DataChannel closed");
+
+      // 4) 接收 AI 回來的 audio track 並播放
       const audio = document.createElement("audio");
       audio.autoplay = true;
-      audio.setAttribute("playsinline", "true"); // iOS 需要
+      audio.setAttribute("playsinline", "true"); // iOS Safari
+      audio.muted = false;
+      audio.volume = 1.0;
       audioRef.current = audio;
 
       pc.ontrack = (event) => {
         setHasRemoteAudio(true);
         log("Received remote audio track ✅");
         audio.srcObject = event.streams[0];
-        // 觸發播放（手機瀏覽器通常需要使用者手勢，你已經是按按鈕觸發）
-        audio.play().catch((e) => log(`audio.play() blocked: ${String(e)}`));
+
+        // 嘗試播放（手機常見被擋：log 會顯示 blocked）
+        audio
+          .play()
+          .then(() => log("audio.play() ✅"))
+          .catch((e) => log(`audio.play() blocked: ${String(e)}`));
       };
 
-      // 4) 把你的麥克風 track 丟進去
+      // 5) 把你的麥克風 track 加到 WebRTC
       streamRef.current.getTracks().forEach((track) => {
         pc.addTrack(track, streamRef.current!);
       });
       log("Local audio tracks added");
 
-      // 5) SDP offer/answer
+      // 6) SDP offer/answer
       const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
       log("Created SDP offer");
 
       const model = "gpt-4o-realtime-preview";
+
       const sdpRes = await fetch(`https://api.openai.com/v1/realtime?model=${model}`, {
         method: "POST",
         headers: {
@@ -150,7 +217,7 @@ export default function SessionPage() {
 
       if (!sdpRes.ok) {
         const errText = await sdpRes.text();
-        log(`Realtime SDP error: ${errText.slice(0, 200)}`);
+        log(`Realtime SDP error ❌: ${errText.slice(0, 300)}`);
         setRtcStatus("failed");
         return;
       }
@@ -158,23 +225,16 @@ export default function SessionPage() {
       const answerSdp = await sdpRes.text();
       await pc.setRemoteDescription({ type: "answer", sdp: answerSdp });
       log("Set remote SDP answer ✅ (WebRTC negotiating)");
-
-      // 這時候等待 ontrack / connectionState 變化即可
     } catch (e: any) {
-      log(`Start realtime failed: ${String(e)}`);
+      log(`Start realtime failed ❌: ${String(e)}`);
       setRtcStatus("failed");
     }
   }
 
   function endRealtime() {
-    try {
-      pcRef.current?.close();
-      pcRef.current = null;
-      setRtcStatus("ended");
-      log("Realtime ended");
-    } catch {
-      // ignore
-    }
+    cleanupRealtime();
+    setRtcStatus("ended");
+    log("Realtime ended");
   }
 
   return (
@@ -194,11 +254,10 @@ export default function SessionPage() {
       >
         <h1 style={{ marginTop: 0 }}>模擬通話練習</h1>
         <p style={{ color: "#475569", lineHeight: 1.6 }}>
-          點擊「下一句提示」切換練習主題。先啟用麥克風，再按「開始即時對話」嘗試連上 AI。
-          下方「連線日誌」會告訴你有沒有真的連上（即使你聽不到聲音也能判斷）。
+          先啟用麥克風，再按「開始即時對話」連線到 AI。下方「連線日誌」會顯示每一步狀態。
         </p>
 
-        {/* 麥克風狀態 */}
+        {/* 麥克風 & Realtime 狀態 */}
         <div
           style={{
             marginTop: 24,
@@ -269,7 +328,9 @@ export default function SessionPage() {
 
             <button
               onClick={startRealtime}
-              disabled={micStatus !== "ready" || rtcStatus === "starting" || rtcStatus === "connected"}
+              disabled={
+                micStatus !== "ready" || rtcStatus === "starting" || rtcStatus === "connected"
+              }
               style={{
                 padding: "8px 14px",
                 borderRadius: 999,
@@ -279,7 +340,9 @@ export default function SessionPage() {
                 fontWeight: 600,
                 cursor: "pointer",
                 opacity:
-                  micStatus !== "ready" || rtcStatus === "starting" || rtcStatus === "connected" ? 0.6 : 1,
+                  micStatus !== "ready" || rtcStatus === "starting" || rtcStatus === "connected"
+                    ? 0.6
+                    : 1,
               }}
             >
               開始即時對話
@@ -309,7 +372,7 @@ export default function SessionPage() {
           </div>
         </div>
 
-        {/* 既有提示區塊 */}
+        {/* 提示區 */}
         <div
           style={{
             marginTop: 24,
@@ -360,7 +423,7 @@ export default function SessionPage() {
           />
         </div>
 
-        {/* 連線日誌（手機也能看） */}
+        {/* 連線日誌 */}
         <div style={{ marginTop: 24 }}>
           <div style={{ fontWeight: 700, marginBottom: 8 }}>連線日誌（Debug）</div>
           <div
@@ -372,12 +435,14 @@ export default function SessionPage() {
               color: "#e2e8f0",
               fontSize: 12,
               lineHeight: 1.5,
-              maxHeight: 240,
+              maxHeight: 260,
               overflow: "auto",
               whiteSpace: "pre-wrap",
             }}
           >
-            {logLines.length ? logLines.join("\n") : "尚無日誌。請先啟用麥克風，再按「開始即時對話」。"}
+            {logLines.length
+              ? logLines.join("\n")
+              : "尚無日誌。請先啟用麥克風，再按「開始即時對話」。"}
           </div>
         </div>
       </section>
