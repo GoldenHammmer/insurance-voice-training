@@ -116,7 +116,7 @@ export default function SessionPage() {
       // 3) 接收 AI 回來的 audio track（就算你聽不到，也會有 track event）
       const audio = document.createElement("audio");
       audio.autoplay = true;
-      audio.playsInline = true; // iOS 需要
+      audio.setAttribute("playsinline", "true"); // iOS 需要
       audioRef.current = audio;
 
       pc.ontrack = (event) => {
