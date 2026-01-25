@@ -1,500 +1,233 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 
-const prompts = [
-  "用一句話向客戶自我介紹，說明你是專業保險顧問。",
-  "詢問客戶目前最在意的保障需求是什麼。",
-  "簡短說明這份保單能解決的風險與保障特色。",
-];
-
 export default function SessionPage() {
-  const [currentPrompt, setCurrentPrompt] = useState(0);
-  const [note, setNote] = useState("");
-
-  // === 麥克風測試：狀態 & 錯誤訊息 ===
-  const [micStatus, setMicStatus] = useState<
-    "idle" | "requesting" | "ready" | "denied" | "error"
-  >("idle");
-  const [micError, setMicError] = useState<string>("");
+  // ===== 基本狀態 =====
   const streamRef = useRef<MediaStream | null>(null);
-
-  // === WebRTC / Realtime：狀態 ===
   const pcRef = useRef<RTCPeerConnection | null>(null);
-  const audioRef = useRef<HTMLAudioElement | null>(null);
   const dcRef = useRef<RTCDataChannel | null>(null);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
 
-  const [rtcStatus, setRtcStatus] = useState<
-    "idle" | "starting" | "connected" | "failed" | "ended"
-  >("idle");
+  const [micReady, setMicReady] = useState(false);
+  const [rtcConnected, setRtcConnected] = useState(false);
   const [logLines, setLogLines] = useState<string[]>([]);
-  const [hasRemoteAudio, setHasRemoteAudio] = useState(false);
+  const sessionTimerRef = useRef<number | null>(null);
 
   function log(msg: string) {
     setLogLines((prev) => {
       const line = `[${new Date().toLocaleTimeString()}] ${msg}`;
-      return [line, ...prev].slice(0, 120);
+      return [line, ...prev].slice(0, 80);
     });
   }
 
-  const nextPrompt = () => {
-    setCurrentPrompt((prev) => (prev + 1) % prompts.length);
-  };
-
-  // === 啟用麥克風：會觸發瀏覽器跳出授權視窗 ===
+  // ===== 啟用麥克風 =====
   async function enableMic() {
-    setMicError("");
-    setMicStatus("requesting");
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: { echoCancellation: true, noiseSuppression: true },
-      });
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       streamRef.current = stream;
-      setMicStatus("ready");
+      setMicReady(true);
       log("Mic ready ✅");
-    } catch (err: any) {
-      const name = err?.name || "UnknownError";
-      setMicStatus(name === "NotAllowedError" ? "denied" : "error");
-      setMicError(`${name}: ${err?.message || String(err)}`);
-      log(`Mic error ❌ ${name}`);
-    }
-  }
-
-  function stopMic() {
-    const stream = streamRef.current;
-    if (stream) {
-      stream.getTracks().forEach((t) => t.stop());
-      streamRef.current = null;
-    }
-    setMicStatus("idle");
-    setMicError("");
-    log("Mic stopped");
-  }
-
-  function cleanupRealtime() {
-    try {
-      dcRef.current?.close();
     } catch {
-      // ignore
+      alert("麥克風啟用失敗，請確認瀏覽器權限");
     }
+  }
+
+  function stopAll() {
+    sessionTimerRef.current && clearTimeout(sessionTimerRef.current);
+    sessionTimerRef.current = null;
+
+    dcRef.current?.close();
+    pcRef.current?.close();
+    streamRef.current?.getTracks().forEach((t) => t.stop());
+
     dcRef.current = null;
-
-    try {
-      pcRef.current?.close();
-    } catch {
-      // ignore
-    }
     pcRef.current = null;
+    streamRef.current = null;
 
-    audioRef.current = null;
-    setHasRemoteAudio(false);
+    setRtcConnected(false);
+    setMicReady(false);
+    log("Session ended ⛔");
   }
 
-  // === 開始 Realtime WebRTC（手機可驗證） ===
+  // ===== 啟動 Realtime =====
   async function startRealtime() {
     if (!streamRef.current) {
       alert("請先啟用麥克風");
       return;
     }
 
-    // 若之前有殘留連線，先清掉
-    cleanupRealtime();
-
-    setRtcStatus("starting");
-    setHasRemoteAudio(false);
     log("Starting realtime…");
 
-    try {
-      // 1) 跟自己 server 要 ephemeral token
-      const tokenRes = await fetch("/api/session/demo/ephemeral", {
-        method: "POST",
-      });
+    // 6 分鐘自動結束
+    sessionTimerRef.current = window.setTimeout(() => {
+      log("⏱ 6 分鐘到，系統自動結束");
+      stopAll();
+    }, 6 * 60 * 1000);
 
-      const tokenJson = await tokenRes.json().catch(() => ({}));
+    const tokenRes = await fetch("/api/session/demo/ephemeral", { method: "POST" });
+    const tokenJson = await tokenRes.json();
+    const clientSecret = tokenJson?.client_secret?.value;
 
-      if (!tokenRes.ok) {
-        log(`Ephemeral error ❌: ${JSON.stringify(tokenJson).slice(0, 400)}`);
-        setRtcStatus("failed");
-        return;
-      }
+    const pc = new RTCPeerConnection();
+    pcRef.current = pc;
 
-      const clientSecret = tokenJson?.client_secret?.value;
-      if (!clientSecret) {
-        log("Ephemeral missing client_secret.value ❌");
-        setRtcStatus("failed");
-        return;
-      }
+    const dc = pc.createDataChannel("oai-events");
+    dcRef.current = dc;
 
-      log("Ephemeral OK ✅");
+    dc.onopen = () => {
+      log("DataChannel open ✅");
 
-      // 2) 建立 RTCPeerConnection
-      const pc = new RTCPeerConnection();
-      pcRef.current = pc;
-
-      pc.onconnectionstatechange = () => {
-        log(`pc.connectionState = ${pc.connectionState}`);
-        if (pc.connectionState === "connected") setRtcStatus("connected");
-        if (pc.connectionState === "failed") setRtcStatus("failed");
-        if (pc.connectionState === "closed") setRtcStatus("ended");
-      };
-
-      pc.oniceconnectionstatechange = () => {
-        log(`pc.iceConnectionState = ${pc.iceConnectionState}`);
-      };
-
-      // 3) DataChannel：用來送控制指令/收事件（關鍵）
-      const dc = pc.createDataChannel("oai-events");
-      dcRef.current = dc;
-
-      dc.onopen = () => {
-        log("DataChannel open ✅");
-
-        // ✅ 先初始化 session：打開 audio+text、voice、VAD、transcription
-        const sessionUpdate = {
+      // ===== System Persona（重點）=====
+      dc.send(
+        JSON.stringify({
           type: "session.update",
           session: {
-            modalities: ["audio", "text"],
+            modalities: ["audio"],
             voice: "alloy",
             input_audio_format: "pcm16",
             output_audio_format: "pcm16",
+            instructions: `
+你是台灣的保險客戶。
+基本設定：
+- 性別：隨機
+- 年齡：35～50 歲
+- 職業：上班族 / 自營
+- 對保險態度：理性但防備，不喜歡被推銷
 
-            // 開轉寫（你之前 transcript:null 就是因為沒開）
-            input_audio_transcription: {
-              model: "gpt-4o-mini-transcribe",
-            },
+互動規則（非常重要）：
+- 每次回覆只能 1～2 句
+- 每句不超過 20 個繁體中文字
+- 口語、自然、像真人
+- 不解釋、不教學、不說大道理
 
-            // 讓模型用 server VAD 自動判斷你講完就回覆
-            turn_detection: {
-              type: "server_vad",
-              threshold: 0.5,
-              prefix_padding_ms: 300,
-              silence_duration_ms: 600,
-            },
+人格姿態（隨機切換）：
+- 責備型：質疑業務動機
+- 討好型：不敢拒絕但不答應
+- 超理智型：只要數據與邏輯
+- 打岔型：轉移話題、敷衍
 
-            // 先做「出聲驗證」，之後你要換成保險 persona 再改這段
-            instructions:
-              "你是語音測試機器人。請用非常短的中文回一句：『我已準備好，請開始。』",
+禁止事項：
+- 不得鼓勵購買
+- 不得保證任何結果
+- 不得講課或長篇分析
+`,
           },
-        };
-
-        dc.send(JSON.stringify(sessionUpdate));
-        log("Sent session.update ✅");
-
-        // ✅ 再要求它立刻說話（驗證 audio output）
-        const hello = {
-          type: "response.create",
-          response: {
-            modalities: ["audio", "text"],
-            instructions: "請說：我已準備好，請開始。",
-          },
-        };
-
-        dc.send(JSON.stringify(hello));
-        log("Sent response.create (hello)");
-      };
-
-      // ✅ 更強的事件日誌：至少印出 type
-      dc.onmessage = (evt) => {
-        try {
-          const data = JSON.parse(String(evt.data || "{}"));
-          const t = data?.type || "unknown";
-          log(`DC event: ${t}`);
-
-          // 若是重要事件（音訊/完成/錯誤），印更多細節（截斷避免爆版）
-          if (
-            String(t).includes("audio") ||
-            String(t).includes("done") ||
-            String(t).includes("error") ||
-            String(t).includes("failed")
-          ) {
-            log(`DC detail: ${JSON.stringify(data).slice(0, 350)}`);
-          }
-        } catch {
-          const text = String(evt.data || "");
-          if (text.length <= 220) log(`DC msg: ${text}`);
-          else log("DC msg: (large payload)");
-        }
-      };
-
-      dc.onerror = () => log("DataChannel error ❌");
-      dc.onclose = () => log("DataChannel closed");
-
-      // 4) 接收 AI 回來的 audio track 並播放
-      const audio = document.createElement("audio");
-      audio.autoplay = true;
-      audio.setAttribute("playsinline", "true"); // iOS Safari
-      audio.muted = false;
-      audio.volume = 1.0;
-      audioRef.current = audio;
-
-      pc.ontrack = (event) => {
-        setHasRemoteAudio(true);
-        log("Received remote audio track ✅");
-        audio.srcObject = event.streams[0];
-
-        audio
-          .play()
-          .then(() => log("audio.play() ✅"))
-          .catch((e) => log(`audio.play() blocked: ${String(e)}`));
-      };
-
-      // 5) 把你的麥克風 track 加到 WebRTC
-      streamRef.current.getTracks().forEach((track) => {
-        pc.addTrack(track, streamRef.current!);
-      });
-      log("Local audio tracks added");
-
-      // 6) SDP offer/answer
-      const offer = await pc.createOffer();
-      await pc.setLocalDescription(offer);
-      log("Created SDP offer");
-
-      const model = "gpt-4o-realtime-preview";
-
-      const sdpRes = await fetch(
-        `https://api.openai.com/v1/realtime?model=${model}`,
-        {
-          method: "POST",
-          headers: {
-            Authorization: `Bearer ${clientSecret}`,
-            "Content-Type": "application/sdp",
-          },
-          body: offer.sdp,
-        }
+        })
       );
+    };
 
-      if (!sdpRes.ok) {
-        const errText = await sdpRes.text();
-        log(`Realtime SDP error ❌: ${errText.slice(0, 400)}`);
-        setRtcStatus("failed");
-        return;
+    dc.onmessage = () => {}; // 不處理 transcript，省 token
+
+    // ===== Audio output =====
+    const audio = document.createElement("audio");
+    audio.autoplay = true;
+    audio.setAttribute("playsinline", "true");
+    audioRef.current = audio;
+
+    pc.ontrack = (e) => {
+      audio.srcObject = e.streams[0];
+      audio.play();
+      log("AI audio playing 🔊");
+    };
+
+    // ===== 加入麥克風 track =====
+    streamRef.current.getTracks().forEach((track) => pc.addTrack(track, streamRef.current!));
+
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+
+    const sdpRes = await fetch(
+      "https://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview",
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${clientSecret}`,
+          "Content-Type": "application/sdp",
+        },
+        body: offer.sdp,
       }
+    );
 
-      const answerSdp = await sdpRes.text();
-      await pc.setRemoteDescription({ type: "answer", sdp: answerSdp });
-      log("Set remote SDP answer ✅ (WebRTC negotiating)");
-    } catch (e: any) {
-      log(`Start realtime failed ❌: ${String(e)}`);
-      setRtcStatus("failed");
-    }
+    const answer = await sdpRes.text();
+    await pc.setRemoteDescription({ type: "answer", sdp: answer });
+
+    setRtcConnected(true);
+    log("Realtime connected ✅");
   }
 
-  function endRealtime() {
-    cleanupRealtime();
-    setRtcStatus("ended");
-    log("Realtime ended");
+  // ===== Push-to-Talk =====
+  function pushStart() {
+    if (!dcRef.current) return;
+    dcRef.current.send(JSON.stringify({ type: "input_audio_buffer.start" }));
+    log("🎙 開始說話");
+  }
+
+  function pushEnd() {
+    if (!dcRef.current) return;
+    dcRef.current.send(JSON.stringify({ type: "input_audio_buffer.commit" }));
+    dcRef.current.send(JSON.stringify({ type: "response.create" }));
+    log("📡 傳送給 AI");
   }
 
   return (
-    <main style={{ maxWidth: 960, margin: "0 auto", padding: "48px 24px" }}>
-      <Link href="/" style={{ color: "#2563eb", textDecoration: "none" }}>
-        ← 回到首頁
-      </Link>
+    <main style={{ maxWidth: 720, margin: "0 auto", padding: 32 }}>
+      <Link href="/">← 回首頁</Link>
 
-      <section
-        style={{
-          marginTop: 24,
-          background: "white",
-          padding: 32,
-          borderRadius: 24,
-          boxShadow: "0 20px 40px rgba(15, 23, 42, 0.08)",
-        }}
-      >
-        <h1 style={{ marginTop: 0 }}>模擬通話練習</h1>
-        <p style={{ color: "#475569", lineHeight: 1.6 }}>
-          先啟用麥克風，再按「開始即時對話」連線到 AI。下方「連線日誌」會顯示每一步狀態。
-        </p>
+      <h1>語音模擬對話（MVP）</h1>
 
-        {/* 麥克風 & Realtime 狀態 */}
-        <div
-          style={{
-            marginTop: 24,
-            padding: 20,
-            borderRadius: 16,
-            border: "1px solid #e5e7eb",
-            background: "#f8fafc",
-          }}
-        >
-          <strong>麥克風狀態</strong>
-          <p style={{ marginTop: 8, fontSize: 14 }}>
-            {micStatus === "idle" && "尚未啟用，按下按鈕後會要求瀏覽器授權"}
-            {micStatus === "requesting" && "正在請求麥克風權限…（請留意瀏覽器彈窗）"}
-            {micStatus === "ready" && "✅ 麥克風已啟用"}
-            {micStatus === "denied" &&
-              "❌ 你拒絕了麥克風權限（可在網址列左側🔒改成允許後重新整理）"}
-            {micStatus === "error" && "⚠️ 啟用失敗（請看下方錯誤訊息）"}
-          </p>
-
-          {micError && (
-            <pre
-              style={{
-                marginTop: 8,
-                padding: 8,
-                fontSize: 12,
-                background: "#f1f5f9",
-                borderRadius: 8,
-                whiteSpace: "pre-wrap",
-                border: "1px solid #e2e8f0",
-              }}
-            >
-              {micError}
-            </pre>
-          )}
-
-          <div style={{ marginTop: 12, display: "flex", gap: 8, flexWrap: "wrap" }}>
-            <button
-              onClick={enableMic}
-              disabled={micStatus === "requesting" || micStatus === "ready"}
-              style={{
-                padding: "8px 14px",
-                borderRadius: 999,
-                border: "none",
-                background: "#16a34a",
-                color: "white",
-                fontWeight: 600,
-                cursor: "pointer",
-                opacity: micStatus === "requesting" || micStatus === "ready" ? 0.6 : 1,
-              }}
-            >
-              啟用麥克風
-            </button>
-
-            <button
-              onClick={stopMic}
-              disabled={micStatus !== "ready"}
-              style={{
-                padding: "8px 14px",
-                borderRadius: 999,
-                border: "1px solid #cbd5e1",
-                background: "white",
-                cursor: "pointer",
-                opacity: micStatus !== "ready" ? 0.6 : 1,
-              }}
-            >
-              停止麥克風
-            </button>
-
-            <button
-              onClick={startRealtime}
-              disabled={
-                micStatus !== "ready" || rtcStatus === "starting" || rtcStatus === "connected"
-              }
-              style={{
-                padding: "8px 14px",
-                borderRadius: 999,
-                border: "none",
-                background: "#7c3aed",
-                color: "white",
-                fontWeight: 600,
-                cursor: "pointer",
-                opacity:
-                  micStatus !== "ready" || rtcStatus === "starting" || rtcStatus === "connected"
-                    ? 0.6
-                    : 1,
-              }}
-            >
-              開始即時對話
-            </button>
-
-            <button
-              onClick={endRealtime}
-              disabled={rtcStatus !== "connected" && rtcStatus !== "starting"}
-              style={{
-                padding: "8px 14px",
-                borderRadius: 999,
-                border: "1px solid #cbd5e1",
-                background: "white",
-                cursor: "pointer",
-                opacity: rtcStatus !== "connected" && rtcStatus !== "starting" ? 0.6 : 1,
-              }}
-            >
-              結束即時對話
-            </button>
-          </div>
-
-          <div style={{ marginTop: 12, fontSize: 14 }}>
-            <strong>Realtime 狀態：</strong> {rtcStatus}
-            <span style={{ marginLeft: 12 }}>
-              <strong>收到 AI 音軌：</strong> {hasRemoteAudio ? "✅" : "—"}
-            </span>
-          </div>
-        </div>
-
-        {/* 提示區 */}
-        <div
-          style={{
-            marginTop: 24,
-            padding: 20,
-            borderRadius: 16,
-            background: "#eff6ff",
-            border: "1px solid #bfdbfe",
-          }}
-        >
-          <strong>目前提示</strong>
-          <p style={{ margin: "8px 0 0", fontSize: 18 }}>{prompts[currentPrompt]}</p>
-        </div>
-
-        <button
-          type="button"
-          onClick={nextPrompt}
-          style={{
-            marginTop: 16,
-            padding: "10px 16px",
-            borderRadius: 999,
-            border: "none",
-            background: "#2563eb",
-            color: "white",
-            fontWeight: 600,
-            cursor: "pointer",
-          }}
-        >
-          下一句提示
+      {!micReady && (
+        <button onClick={enableMic} style={{ padding: 12 }}>
+          啟用麥克風
         </button>
+      )}
 
-        <div style={{ marginTop: 24 }}>
-          <label htmlFor="note" style={{ display: "block", marginBottom: 8 }}>
-            今日自我回饋
-          </label>
-          <textarea
-            id="note"
-            value={note}
-            onChange={(event) => setNote(event.target.value)}
-            placeholder="例：語速要再放慢一點、先詢問需求再介紹保單"
-            rows={5}
-            style={{
-              width: "100%",
-              padding: 12,
-              borderRadius: 12,
-              border: "1px solid #cbd5f5",
-              fontFamily: "inherit",
-            }}
-          />
-        </div>
+      {micReady && !rtcConnected && (
+        <button onClick={startRealtime} style={{ padding: 12 }}>
+          開始練習
+        </button>
+      )}
 
-        {/* 連線日誌 */}
-        <div style={{ marginTop: 24 }}>
-          <div style={{ fontWeight: 700, marginBottom: 8 }}>連線日誌（Debug）</div>
-          <div
+      {rtcConnected && (
+        <>
+          <button
+            onMouseDown={pushStart}
+            onMouseUp={pushEnd}
+            onTouchStart={pushStart}
+            onTouchEnd={pushEnd}
             style={{
-              border: "1px solid #e2e8f0",
-              borderRadius: 12,
-              padding: 12,
-              background: "#0b1220",
-              color: "#e2e8f0",
-              fontSize: 12,
-              lineHeight: 1.5,
-              maxHeight: 320,
-              overflow: "auto",
-              whiteSpace: "pre-wrap",
+              marginTop: 24,
+              padding: "20px 40px",
+              borderRadius: 999,
+              background: "#7c3aed",
+              color: "white",
+              fontSize: 18,
             }}
           >
-            {logLines.length
-              ? logLines.join("\n")
-              : "尚無日誌。請先啟用麥克風，再按「開始即時對話」。"}
-          </div>
-        </div>
-      </section>
+            按住說話
+          </button>
+
+          <button onClick={stopAll} style={{ marginTop: 12 }}>
+            結束練習
+          </button>
+        </>
+      )}
+
+      <pre
+        style={{
+          marginTop: 24,
+          background: "#0f172a",
+          color: "#e5e7eb",
+          padding: 12,
+          borderRadius: 12,
+          fontSize: 12,
+          maxHeight: 240,
+          overflow: "auto",
+        }}
+      >
+        {logLines.join("\n")}
+      </pre>
     </main>
   );
 }
