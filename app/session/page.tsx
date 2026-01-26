@@ -22,7 +22,6 @@ const prompts = [
 function nowTime() {
   return new Date().toLocaleTimeString();
 }
-
 function sleep(ms: number) {
   return new Promise((r) => setTimeout(r, ms));
 }
@@ -51,9 +50,17 @@ export default function SessionPage() {
 
   const [rtcStatus, setRtcStatus] = useState<RtcStatus>("idle");
   const [hasRemoteAudio, setHasRemoteAudio] = useState(false);
-  const [logLines, setLogLines] = useState<string[]>([]);
 
-  // push to talk
+  // debug log
+  const [logLines, setLogLines] = useState<string[]>([]);
+  function log(msg: string) {
+    setLogLines((prev) => {
+      const line = `[${nowTime()}] ${msg}`;
+      return [line, ...prev].slice(0, 260);
+    });
+  }
+
+  // push-to-talk
   const [isHolding, setIsHolding] = useState(false);
 
   // 6 minutes limit
@@ -61,12 +68,10 @@ export default function SessionPage() {
   const [remainingSec, setRemainingSec] = useState<number>(LIMIT_SEC);
   const timerRef = useRef<number | null>(null);
 
-  function log(msg: string) {
-    setLogLines((prev) => {
-      const line = `[${nowTime()}] ${msg}`;
-      return [line, ...prev].slice(0, 200);
-    });
-  }
+  // wait-for event
+  const waitersRef = useRef<Map<string, { resolve: () => void; reject: (e: any) => void }>>(
+    new Map()
+  );
 
   const nextPrompt = () => setCurrentPrompt((p) => (p + 1) % prompts.length);
 
@@ -75,9 +80,9 @@ export default function SessionPage() {
       case "appointment":
         return "電話約訪：你剛接到保險顧問來電，對方想約你見面。你可拒絕或保留。";
       case "product":
-        return "行銷保險商品：對方介紹保險商品，你會問費用/保障/理賠條件，用短句回。";
+        return "行銷保險商品：對方介紹商品，你會問費用/保障/理賠條件，用短句回。";
       case "relationship":
-        return "客情培養：對方以關心與服務為主，你會聊天但保留界線，觀察動機。";
+        return "客情培養：對方以關心服務為主，你會聊天但保留界線，觀察動機。";
       default:
         return "";
     }
@@ -85,24 +90,21 @@ export default function SessionPage() {
 
   const personaText = useMemo(() => {
     const genderText = gender === "male" ? "男" : "女";
-
-    const jobTextMap: Record<PersonaJob, string> = {
+    const jobMap: Record<PersonaJob, string> = {
       factory: "工廠/製造業",
       office: "一般上班族",
       self_employed: "自營/小店老闆",
       teacher: "教育相關",
       healthcare: "醫療相關",
     };
-
-    const attitudeTextMap: Record<PersonaAttitude, string> = {
+    const attitudeMap: Record<PersonaAttitude, string> = {
       neutral: "中立：願意聽但不喜歡被推銷",
-      skeptical: "懷疑：怕被話術、會質疑動機",
+      skeptical skeptical: "懷疑：怕被話術、會質疑動機",
       price_sensitive: "價格敏感：很在意保費負擔",
       already_has: "已有保單：覺得自己差不多夠了",
       avoid_talk: "抗拒：不想談保險、想結束對話",
     };
-
-    const postureRuleMap: Record<PersonaPosture, string> = {
+    const postureMap: Record<PersonaPosture, string> = {
       doubt_motive: "姿態：質疑業務動機（常問是不是要賣我）。",
       cant_refuse: "姿態：不敢拒絕但不答應（常說我再看看/問家人）。",
       data_only: "姿態：只要數據與邏輯（追問保障/保費/條件）。",
@@ -111,19 +113,18 @@ export default function SessionPage() {
 
     return {
       genderText,
-      jobText: jobTextMap[job],
-      attitudeText: attitudeTextMap[attitude],
-      postureRule: postureRuleMap[posture],
+      jobText: jobMap[job],
+      attitudeText: attitudeMap[attitude],
+      postureRule: postureMap[posture],
     };
   }, [gender, job, attitude, posture]);
 
-  // ✅ 超短 persona reminder：每次 response 都塞這個（強制生效、很省 token）
+  // 超短 reminder：每回合都塞，防漂移
   const personaReminder = useMemo(() => {
-    // 盡量短，避免貴
-    return `你=台灣保險客戶；${personaText.genderText}${age}歲；${personaText.jobText}；${personaText.attitudeText}；${personaText.postureRule}；主題：${topicText}；永遠繁中；每次最多2句、每句<=18字、總<=36字；別問「想聊什麼」；別說你在扮演什麼，被問人設就反問或敷衍。`;
+    return `你=台灣保險客戶；${personaText.genderText}${age}歲；${personaText.jobText}；${personaText.attitudeText}；${personaText.postureRule}；主題：${topicText}；永遠繁中；每次最多2句、每句<=18字、總<=36字；禁止問「想聊什麼」；被問人設就反問。`;
   }, [personaText, age, topicText]);
 
-  // ✅ 完整 system：第一次 session.update 用（比較長）
+  // 第一次 session.update 用（較長）
   const systemInstructions = useMemo(() => {
     return [
       "【語言】永遠繁體中文（台灣用語），不得英文/簡體。",
@@ -134,8 +135,8 @@ export default function SessionPage() {
       `【人設】性別${personaText.genderText}，年齡${age}，職業${personaText.jobText}。`,
       `【看法】${personaText.attitudeText}`,
       `【姿態(隱藏)】${personaText.postureRule}`,
-      "【反防呆】如果使用者問『你的人設是什麼』，你要像客戶一樣回：『你問這個幹嘛？你要講重點嗎？』等，不可跳出角色。",
-      "【開場】連線成功後先像客戶回一句：『你好，你哪位？』或『你是做保險的？』",
+      "【反防呆】若使用者問『你的人設是什麼』，你要像客戶回：『你問這個幹嘛？你要講重點嗎？』不可跳出角色。",
+      "【開場固定句】連線成功後，你必須只回這一句：『你好，你是做保險的喔？』",
     ].join("\n");
   }, [topicText, personaText, age]);
 
@@ -168,6 +169,22 @@ export default function SessionPage() {
     log("Mic stopped");
   }
 
+  function startTimer() {
+    setRemainingSec(LIMIT_SEC);
+    if (timerRef.current) window.clearInterval(timerRef.current);
+    timerRef.current = window.setInterval(() => {
+      setRemainingSec((prev) => {
+        const next = prev - 1;
+        if (next <= 0) {
+          log("⏱️ 已達 6 分鐘上限，自動結束");
+          endRealtime();
+          return 0;
+        }
+        return next;
+      });
+    }, 1000);
+  }
+
   function cleanupRealtime() {
     if (timerRef.current) {
       window.clearInterval(timerRef.current);
@@ -197,28 +214,58 @@ export default function SessionPage() {
     audioRef.current = null;
 
     setHasRemoteAudio(false);
+
+    // clear waiters
+    waitersRef.current.clear();
   }
 
-  function startTimer() {
-    setRemainingSec(LIMIT_SEC);
-    if (timerRef.current) window.clearInterval(timerRef.current);
-    timerRef.current = window.setInterval(() => {
-      setRemainingSec((prev) => {
-        const next = prev - 1;
-        if (next <= 0) {
-          log("⏱️ 已達 6 分鐘上限，自動結束");
-          endRealtime();
-          return 0;
-        }
-        return next;
-      });
-    }, 1000);
+  function endRealtime() {
+    cleanupRealtime();
+    setRtcStatus("ended");
+    log("Session ended ⛔");
   }
 
   function setMicTrackEnabled(enabled: boolean) {
     const stream = streamRef.current;
     if (!stream) return;
     stream.getAudioTracks().forEach((t) => (t.enabled = enabled));
+  }
+
+  function waitFor(type: string, timeoutMs = 2500) {
+    return new Promise<void>((resolve, reject) => {
+      const key = `${type}:${Date.now()}:${Math.random()}`;
+      const timer = window.setTimeout(() => {
+        waitersRef.current.delete(key);
+        reject(new Error(`waitFor timeout: ${type}`));
+      }, timeoutMs);
+      waitersRef.current.set(key, {
+        resolve: () => {
+          window.clearTimeout(timer);
+          waitersRef.current.delete(key);
+          resolve();
+        },
+        reject: (e) => {
+          window.clearTimeout(timer);
+          waitersRef.current.delete(key);
+          reject(e);
+        },
+      });
+
+      // 我們用 key 存，但觸發時會掃一遍同 type 的 waiter
+      (waitersRef.current as any)._wantedType = type;
+    });
+  }
+
+  function resolveWaitersForType(type: string) {
+    // 把所有等待同 type 的 resolve 掃掉
+    for (const [k, v] of waitersRef.current.entries()) {
+      const wantedType = (waitersRef.current as any)._wantedType;
+      if (wantedType === type) {
+        v.resolve();
+      }
+    }
+    // 重置 wantedType 避免誤觸
+    (waitersRef.current as any)._wantedType = null;
   }
 
   async function startRealtime() {
@@ -236,7 +283,7 @@ export default function SessionPage() {
       const tokenRes = await fetch("/api/session/demo/ephemeral", { method: "POST" });
       const tokenJson = await tokenRes.json().catch(() => ({}));
       if (!tokenRes.ok) {
-        log(`Ephemeral error ❌: ${JSON.stringify(tokenJson).slice(0, 280)}`);
+        log(`Ephemeral error ❌: ${JSON.stringify(tokenJson).slice(0, 260)}`);
         setRtcStatus("failed");
         return;
       }
@@ -252,19 +299,46 @@ export default function SessionPage() {
       pcRef.current = pc;
 
       pc.onconnectionstatechange = () => {
-        log(`Realtime ${pc.connectionState}`);
         if (pc.connectionState === "connected") setRtcStatus("connected");
         if (pc.connectionState === "failed") setRtcStatus("failed");
         if (pc.connectionState === "closed") setRtcStatus("ended");
+        log(`pc.connectionState=${pc.connectionState}`);
       };
 
       const dc = pc.createDataChannel("oai-events");
       dcRef.current = dc;
 
+      // ✅ 重要：把 DC 事件印回來，才能知道 session.update 是否真的生效
+      dc.onmessage = (evt) => {
+        try {
+          const data = JSON.parse(String(evt.data || "{}"));
+          const t = data?.type || "unknown";
+          log(`DC event: ${t}`);
+
+          // 只對關鍵事件印 detail（避免爆版）
+          if (
+            t === "session.updated" ||
+            t === "session.created" ||
+            t === "response.done" ||
+            t === "response.created" ||
+            t.includes("error") ||
+            t.includes("failed") ||
+            t.includes("rate_limits")
+          ) {
+            log(`DC detail: ${JSON.stringify(data).slice(0, 380)}`);
+          }
+
+          if (t === "session.updated") resolveWaitersForType("session.updated");
+        } catch {
+          const text = String(evt.data || "");
+          log(text.length > 120 ? "DC msg: (large payload)" : `DC msg: ${text}`);
+        }
+      };
+
       dc.onopen = async () => {
         log("DataChannel open ✅");
 
-        // session.update：只 audio、關掉 transcription、turn_detection null
+        // ✅ session.update：只 audio、關掉 transcription
         const sessionUpdate = {
           type: "session.update",
           session: {
@@ -272,53 +346,48 @@ export default function SessionPage() {
             voice: gender === "male" ? "alloy" : "verse",
             input_audio_format: "pcm16",
             output_audio_format: "pcm16",
+            // 關掉轉寫
+            input_audio_transcription: null,
+            // 這裡保留 server_vad 也行，但你要 PTT 我們就不靠它
             turn_detection: null,
             instructions: systemInstructions,
           },
         };
 
         dc.send(JSON.stringify(sessionUpdate));
-        log("Sent session.update ✅");
+        log("Sent session.update ✅ (waiting session.updated…)");
 
-        // ✅ 等一下再開場，避免 race condition
-        await sleep(200);
+        // ✅ 一定要等到 session.updated，才開始開場
+        try {
+          await waitFor("session.updated", 3000);
+          log("session.updated ✅ (persona should be active now)");
+        } catch (e: any) {
+          log(`⚠️ No session.updated: ${String(e)} (仍嘗試開場)`);
+        }
 
-        // ✅ 強制 persona 生效：這回合也塞 reminder（短）
+        // ✅ 硬驗證：強制開場句（如果沒照念＝指令沒吃到）
         dc.send(
           JSON.stringify({
             type: "response.create",
             response: {
               modalities: ["audio"],
-              max_output_tokens: 80,
-              instructions: personaReminder + "。請用客戶身分先回一句開場話。",
+              max_output_tokens: 40,
+              temperature: 0.2,
+              instructions:
+                personaReminder +
+                "。你必須只回這一句：『你好，你是做保險的喔？』(逐字照念，不能多字)。",
             },
           })
         );
-        log("AI opening… 🔊");
+        log("AI opening… 🔊 (should say fixed sentence)");
 
         startTimer();
-      };
-
-      dc.onmessage = (evt) => {
-        try {
-          const data = JSON.parse(String(evt.data || "{}"));
-          const t = data?.type || "unknown";
-          if (t === "response.done") {
-            const status = data?.response?.status;
-            log(`AI responded (${status}) ✅`);
-            if (status === "failed") log(`AI error: ${JSON.stringify(data).slice(0, 260)}`);
-            return;
-          }
-          if (t === "output_audio_buffer.stopped") {
-            log("AI audio done 🔇");
-            return;
-          }
-        } catch {}
       };
 
       dc.onclose = () => log("DataChannel closed");
       dc.onerror = () => log("DataChannel error ❌");
 
+      // audio output
       const audio = document.createElement("audio");
       audio.autoplay = true;
       audio.setAttribute("playsinline", "true");
@@ -335,7 +404,7 @@ export default function SessionPage() {
           .catch((e) => log(`audio.play blocked: ${String(e)}`));
       };
 
-      // local tracks default off (push-to-talk)
+      // local tracks default OFF (PTT)
       streamRef.current.getTracks().forEach((track) => {
         track.enabled = false;
         pc.addTrack(track, streamRef.current!);
@@ -370,12 +439,6 @@ export default function SessionPage() {
     }
   }
 
-  function endRealtime() {
-    cleanupRealtime();
-    setRtcStatus("ended");
-    log("Session ended ⛔");
-  }
-
   function pttDown() {
     if (rtcStatus !== "connected") {
       alert("請先開始即時對話");
@@ -395,7 +458,7 @@ export default function SessionPage() {
     setIsHolding(false);
     setMicTrackEnabled(false);
 
-    // ✅ 每回合都塞超短 personaReminder，避免漂移（很省）
+    // ✅ 每回合都塞 persona reminder，逼它不要漂移
     try {
       dcRef.current?.send(
         JSON.stringify({
@@ -403,6 +466,7 @@ export default function SessionPage() {
           response: {
             modalities: ["audio"],
             max_output_tokens: 80,
+            temperature: 0.3,
             instructions: personaReminder,
           },
         })
@@ -577,7 +641,9 @@ export default function SessionPage() {
               fontWeight: 800,
               cursor: "pointer",
               opacity:
-                micStatus !== "ready" || rtcStatus === "starting" || rtcStatus === "connected" ? 0.6 : 1,
+                micStatus !== "ready" || rtcStatus === "starting" || rtcStatus === "connected"
+                  ? 0.6
+                  : 1,
             }}
           >
             開始即時對話
@@ -659,7 +725,7 @@ export default function SessionPage() {
           <p style={{ margin: "8px 0 0", fontSize: 18 }}>{prompts[currentPrompt]}</p>
           <button
             type="button"
-            onClick={nextPrompt}
+            onClick={() => nextPrompt()}
             style={{
               marginTop: 12,
               padding: "10px 14px",
@@ -708,7 +774,7 @@ export default function SessionPage() {
               color: "#e2e8f0",
               fontSize: 12,
               lineHeight: 1.5,
-              maxHeight: 320,
+              maxHeight: 340,
               overflow: "auto",
               whiteSpace: "pre-wrap",
             }}
