@@ -99,7 +99,7 @@ export default function SessionPage() {
     };
     const attitudeMap: Record<PersonaAttitude, string> = {
       neutral: "中立：願意聽但不喜歡被推銷",
-      skeptical skeptical: "懷疑：怕被話術、會質疑動機",
+      skeptical: "懷疑：怕被話術、會質疑動機",
       price_sensitive: "價格敏感：很在意保費負擔",
       already_has: "已有保單：覺得自己差不多夠了",
       avoid_talk: "抗拒：不想談保險、想結束對話",
