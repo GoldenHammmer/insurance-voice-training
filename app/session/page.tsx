@@ -23,12 +23,15 @@ function nowTime() {
   return new Date().toLocaleTimeString();
 }
 
+function sleep(ms: number) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
 export default function SessionPage() {
-  // ===== 練習提示 =====
   const [currentPrompt, setCurrentPrompt] = useState(0);
   const [note, setNote] = useState("");
 
-  // ===== 人設選擇（使用者可選）=====
+  // 人設
   const [gender, setGender] = useState<PersonaGender>("male");
   const [age, setAge] = useState<PersonaAge>("38");
   const [job, setJob] = useState<PersonaJob>("factory");
@@ -36,12 +39,12 @@ export default function SessionPage() {
   const [posture, setPosture] = useState<PersonaPosture>("doubt_motive");
   const [topic, setTopic] = useState<SimTopic>("appointment");
 
-  // ===== 麥克風 =====
+  // mic
   const [micStatus, setMicStatus] = useState<MicStatus>("idle");
   const [micError, setMicError] = useState("");
   const streamRef = useRef<MediaStream | null>(null);
 
-  // ===== WebRTC / Realtime =====
+  // rtc
   const pcRef = useRef<RTCPeerConnection | null>(null);
   const dcRef = useRef<RTCDataChannel | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
@@ -50,10 +53,10 @@ export default function SessionPage() {
   const [hasRemoteAudio, setHasRemoteAudio] = useState(false);
   const [logLines, setLogLines] = useState<string[]>([]);
 
-  // ===== Push-to-talk =====
+  // push to talk
   const [isHolding, setIsHolding] = useState(false);
 
-  // ===== 6 分鐘上限 =====
+  // 6 minutes limit
   const LIMIT_SEC = 6 * 60;
   const [remainingSec, setRemainingSec] = useState<number>(LIMIT_SEC);
   const timerRef = useRef<number | null>(null);
@@ -61,27 +64,25 @@ export default function SessionPage() {
   function log(msg: string) {
     setLogLines((prev) => {
       const line = `[${nowTime()}] ${msg}`;
-      return [line, ...prev].slice(0, 160);
+      return [line, ...prev].slice(0, 200);
     });
   }
 
   const nextPrompt = () => setCurrentPrompt((p) => (p + 1) % prompts.length);
 
-  // ===== 對話主題文字 =====
   const topicText = useMemo(() => {
     switch (topic) {
       case "appointment":
-        return "電話約訪：你剛接到保險顧問來電，對方想約你見面。你要像一般客戶回應、可拒絕或保留。";
+        return "電話約訪：你剛接到保險顧問來電，對方想約你見面。你可拒絕或保留。";
       case "product":
-        return "行銷保險商品：對方正在介紹某個保險商品，你會問重點、疑慮、費用、保障，並用短句回覆。";
+        return "行銷保險商品：對方介紹保險商品，你會問費用/保障/理賠條件，用短句回。";
       case "relationship":
-        return "客情培養：對方以關心與服務為主（非硬推銷）。你會聊天但保留界線，觀察對方動機。";
+        return "客情培養：對方以關心與服務為主，你會聊天但保留界線，觀察動機。";
       default:
         return "";
     }
   }, [topic]);
 
-  // ===== 人設文字 =====
   const personaText = useMemo(() => {
     const genderText = gender === "male" ? "男" : "女";
 
@@ -94,22 +95,18 @@ export default function SessionPage() {
     };
 
     const attitudeTextMap: Record<PersonaAttitude, string> = {
-      neutral: "中立：願意聽，但不喜歡被推銷",
-      skeptical: "懷疑：容易質疑業務動機，怕被話術",
-      price_sensitive: "價格敏感：很在意保費負擔與CP值",
+      neutral: "中立：願意聽但不喜歡被推銷",
+      skeptical: "懷疑：怕被話術、會質疑動機",
+      price_sensitive: "價格敏感：很在意保費負擔",
       already_has: "已有保單：覺得自己差不多夠了",
-      avoid_talk: "抗拒：不想談保險，容易想結束對話",
+      avoid_talk: "抗拒：不想談保險、想結束對話",
     };
 
     const postureRuleMap: Record<PersonaPosture, string> = {
-      doubt_motive:
-        "姿態（藏在你心裡）：你會質疑對方動機，常用『你是不是要賣我東西？』『我先看看』這類話。",
-      cant_refuse:
-        "姿態（藏在你心裡）：你不太會拒絕，但也不答應，常用『我再想想』『我問一下家人』拖延。",
-      data_only:
-        "姿態（藏在你心裡）：你只接受數據與邏輯，常追問『保障多少？保費多少？理賠條件？』。",
-      change_topic:
-        "姿態（藏在你心裡）：你常轉移話題/敷衍，想把對話帶走或快速結束。",
+      doubt_motive: "姿態：質疑業務動機（常問是不是要賣我）。",
+      cant_refuse: "姿態：不敢拒絕但不答應（常說我再看看/問家人）。",
+      data_only: "姿態：只要數據與邏輯（追問保障/保費/條件）。",
+      change_topic: "姿態：轉移話題/敷衍（想快結束）。",
     };
 
     return {
@@ -120,57 +117,34 @@ export default function SessionPage() {
     };
   }, [gender, job, attitude, posture]);
 
-  // ===== System 指令：一次寫進 session.update（後續回合不覆蓋）=====
-  const systemInstructions = useMemo(() => {
-    const { genderText, jobText, attitudeText, postureRule } = personaText;
-
-    // 超省錢短句規則（你要的重點）
-    const shortRule =
-      "【重要規則】每次回覆最多 2 句；每句不超過 18 個字；總字數不超過 36 字；不要列點；不要長篇解釋。";
-
-    // 語言鎖定與禁止通用開場（你遇到的問題）
-    const langRule =
-      "【重要規則】你必須永遠使用「繁體中文（台灣用語）」回覆，不得使用英文或簡體。";
-    const roleRule =
-      "【重要規則】你正在扮演「台灣一般民眾的保險客戶」，不是聊天助理。";
-    const noGenericOpen =
-      "【重要規則】你不要問『你今天想聊什麼』『想聊什麼主題』這類通用開場。";
-
-    // 主題導向（你新增的）
-    const topicRule =
-      `【模擬對話主題】${topicText}\n` +
-      "你必須在這個主題框架下回話，不要跳到別的主題。";
-
-    // 開場規則（連上就先像客戶回一句）
-    const opening =
-      "【開場】連線建立後，你先用客戶身分自然回一句（例：『你好，你找我什麼事？』或『你是做保險的？』），不要問主題。";
-
-    return [
-      langRule,
-      roleRule,
-      noGenericOpen,
-      shortRule,
-      topicRule,
-      "",
-      `基本資料：性別${genderText}，年齡${age}歲，職業：${jobText}。`,
-      `對保險看法：${personaText.attitudeText}`,
-      postureRule,
-      "",
-      "情境：使用者是保險顧問，正在用口語跟你對話。你保持客戶立場，可拒絕、可保留、可要求證據。",
-      opening,
-    ].join("\n");
+  // ✅ 超短 persona reminder：每次 response 都塞這個（強制生效、很省 token）
+  const personaReminder = useMemo(() => {
+    // 盡量短，避免貴
+    return `你=台灣保險客戶；${personaText.genderText}${age}歲；${personaText.jobText}；${personaText.attitudeText}；${personaText.postureRule}；主題：${topicText}；永遠繁中；每次最多2句、每句<=18字、總<=36字；別問「想聊什麼」；別說你在扮演什麼，被問人設就反問或敷衍。`;
   }, [personaText, age, topicText]);
 
-  // ===== 麥克風 =====
+  // ✅ 完整 system：第一次 session.update 用（比較長）
+  const systemInstructions = useMemo(() => {
+    return [
+      "【語言】永遠繁體中文（台灣用語），不得英文/簡體。",
+      "【身份】你是台灣一般民眾『保險客戶』，不是助理。",
+      "【禁止】不要問『你想聊什麼』、『今天聊什麼』。",
+      "【短句省錢】每次回覆最多 2 句；每句<=18字；總<=36字；不要列點；不要長解釋。",
+      `【主題】${topicText}`,
+      `【人設】性別${personaText.genderText}，年齡${age}，職業${personaText.jobText}。`,
+      `【看法】${personaText.attitudeText}`,
+      `【姿態(隱藏)】${personaText.postureRule}`,
+      "【反防呆】如果使用者問『你的人設是什麼』，你要像客戶一樣回：『你問這個幹嘛？你要講重點嗎？』等，不可跳出角色。",
+      "【開場】連線成功後先像客戶回一句：『你好，你哪位？』或『你是做保險的？』",
+    ].join("\n");
+  }, [topicText, personaText, age]);
+
   async function enableMic() {
     setMicError("");
     setMicStatus("requesting");
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          echoCancellation: true,
-          noiseSuppression: true,
-        },
+        audio: { echoCancellation: true, noiseSuppression: true },
       });
       streamRef.current = stream;
       setMicStatus("ready");
@@ -195,7 +169,6 @@ export default function SessionPage() {
   }
 
   function cleanupRealtime() {
-    // timer
     if (timerRef.current) {
       window.clearInterval(timerRef.current);
       timerRef.current = null;
@@ -228,15 +201,11 @@ export default function SessionPage() {
 
   function startTimer() {
     setRemainingSec(LIMIT_SEC);
-    if (timerRef.current) {
-      window.clearInterval(timerRef.current);
-      timerRef.current = null;
-    }
+    if (timerRef.current) window.clearInterval(timerRef.current);
     timerRef.current = window.setInterval(() => {
       setRemainingSec((prev) => {
         const next = prev - 1;
         if (next <= 0) {
-          // auto end
           log("⏱️ 已達 6 分鐘上限，自動結束");
           endRealtime();
           return 0;
@@ -246,7 +215,12 @@ export default function SessionPage() {
     }, 1000);
   }
 
-  // ===== 開始 Realtime =====
+  function setMicTrackEnabled(enabled: boolean) {
+    const stream = streamRef.current;
+    if (!stream) return;
+    stream.getAudioTracks().forEach((t) => (t.enabled = enabled));
+  }
+
   async function startRealtime() {
     if (!streamRef.current) {
       alert("請先啟用麥克風");
@@ -259,15 +233,13 @@ export default function SessionPage() {
     log("Starting realtime…");
 
     try {
-      // 1) 要 ephemeral token
       const tokenRes = await fetch("/api/session/demo/ephemeral", { method: "POST" });
       const tokenJson = await tokenRes.json().catch(() => ({}));
       if (!tokenRes.ok) {
-        log(`Ephemeral error ❌: ${JSON.stringify(tokenJson).slice(0, 400)}`);
+        log(`Ephemeral error ❌: ${JSON.stringify(tokenJson).slice(0, 280)}`);
         setRtcStatus("failed");
         return;
       }
-
       const clientSecret = tokenJson?.client_secret?.value;
       if (!clientSecret) {
         log("Ephemeral missing client_secret.value ❌");
@@ -276,60 +248,54 @@ export default function SessionPage() {
       }
       log("Ephemeral OK ✅");
 
-      // 2) PeerConnection
       const pc = new RTCPeerConnection();
       pcRef.current = pc;
 
       pc.onconnectionstatechange = () => {
-        if (!pcRef.current) return;
         log(`Realtime ${pc.connectionState}`);
         if (pc.connectionState === "connected") setRtcStatus("connected");
         if (pc.connectionState === "failed") setRtcStatus("failed");
         if (pc.connectionState === "closed") setRtcStatus("ended");
       };
 
-      // 3) DataChannel
       const dc = pc.createDataChannel("oai-events");
       dcRef.current = dc;
 
-      dc.onopen = () => {
+      dc.onopen = async () => {
         log("DataChannel open ✅");
 
-        // ✅ 只輸出 audio、關掉 transcription、關掉 server_vad（因為你要 push-to-talk）
+        // session.update：只 audio、關掉 transcription、turn_detection null
         const sessionUpdate = {
           type: "session.update",
           session: {
             modalities: ["audio"],
-            voice: gender === "male" ? "alloy" : "verse", // 先做男女差異（不追求音色）
+            voice: gender === "male" ? "alloy" : "verse",
             input_audio_format: "pcm16",
             output_audio_format: "pcm16",
-
-            // 關掉轉寫（省錢）
-            // input_audio_transcription: undefined,
-
-            // Push-to-talk：不使用 server_vad
             turn_detection: null,
-
-            // 核心：人設 + 主題 + 短句限制（一次寫進 session）
             instructions: systemInstructions,
           },
         };
 
         dc.send(JSON.stringify(sessionUpdate));
-        log("Persona loaded ✅");
+        log("Sent session.update ✅");
 
-        // ✅ 讓 AI 依照 system 開場（不要再塞 instructions）
-        const hello = {
-          type: "response.create",
-          response: {
-            modalities: ["audio"],
-            max_output_tokens: 80,
-          },
-        };
-        dc.send(JSON.stringify(hello));
+        // ✅ 等一下再開場，避免 race condition
+        await sleep(200);
+
+        // ✅ 強制 persona 生效：這回合也塞 reminder（短）
+        dc.send(
+          JSON.stringify({
+            type: "response.create",
+            response: {
+              modalities: ["audio"],
+              max_output_tokens: 80,
+              instructions: personaReminder + "。請用客戶身分先回一句開場話。",
+            },
+          })
+        );
         log("AI opening… 🔊");
 
-        // 6 分鐘計時開始
         startTimer();
       };
 
@@ -337,12 +303,9 @@ export default function SessionPage() {
         try {
           const data = JSON.parse(String(evt.data || "{}"));
           const t = data?.type || "unknown";
-
-          // 精簡日誌（避免爆量）
           if (t === "response.done") {
             const status = data?.response?.status;
             log(`AI responded (${status}) ✅`);
-            // 若 failed，印錯誤
             if (status === "failed") log(`AI error: ${JSON.stringify(data).slice(0, 260)}`);
             return;
           }
@@ -350,21 +313,12 @@ export default function SessionPage() {
             log("AI audio done 🔇");
             return;
           }
-          if (t === "rate_limits.updated") {
-            return;
-          }
-
-          // 其他事件只在 debug 需要時留
-          // log(`DC: ${t}`);
-        } catch {
-          // ignore
-        }
+        } catch {}
       };
 
       dc.onclose = () => log("DataChannel closed");
       dc.onerror = () => log("DataChannel error ❌");
 
-      // 4) 播放 AI 音訊
       const audio = document.createElement("audio");
       audio.autoplay = true;
       audio.setAttribute("playsinline", "true");
@@ -381,13 +335,12 @@ export default function SessionPage() {
           .catch((e) => log(`audio.play blocked: ${String(e)}`));
       };
 
-      // 5) 加入本地音軌（先 enabled=false，等按住再開）
+      // local tracks default off (push-to-talk)
       streamRef.current.getTracks().forEach((track) => {
-        track.enabled = false; // push-to-talk 預設關
+        track.enabled = false;
         pc.addTrack(track, streamRef.current!);
       });
 
-      // 6) SDP
       const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
 
@@ -410,7 +363,6 @@ export default function SessionPage() {
 
       const answerSdp = await sdpRes.text();
       await pc.setRemoteDescription({ type: "answer", sdp: answerSdp });
-
       log("Realtime connected ✅");
     } catch (e: any) {
       log(`Start realtime failed ❌: ${String(e)}`);
@@ -422,13 +374,6 @@ export default function SessionPage() {
     cleanupRealtime();
     setRtcStatus("ended");
     log("Session ended ⛔");
-  }
-
-  // ===== Push-to-talk：按住開始說、放開送出 =====
-  function setMicTrackEnabled(enabled: boolean) {
-    const stream = streamRef.current;
-    if (!stream) return;
-    stream.getAudioTracks().forEach((t) => (t.enabled = enabled));
   }
 
   function pttDown() {
@@ -450,14 +395,15 @@ export default function SessionPage() {
     setIsHolding(false);
     setMicTrackEnabled(false);
 
-    // 送出回覆請求（不要塞 instructions，避免覆蓋人設）
+    // ✅ 每回合都塞超短 personaReminder，避免漂移（很省）
     try {
       dcRef.current?.send(
         JSON.stringify({
           type: "response.create",
           response: {
             modalities: ["audio"],
-            max_output_tokens: 80, // 省錢：短回覆
+            max_output_tokens: 80,
+            instructions: personaReminder,
           },
         })
       );
@@ -467,7 +413,6 @@ export default function SessionPage() {
     }
   }
 
-  // 防止離開頁面時殘留
   useEffect(() => {
     return () => cleanupRealtime();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -492,11 +437,8 @@ export default function SessionPage() {
         }}
       >
         <h1 style={{ marginTop: 0 }}>語音模擬對話（MVP）</h1>
-        <p style={{ color: "#475569", lineHeight: 1.6 }}>
-          流程：先選人設與主題 → 啟用麥克風 → 開始即時對話 →「按住說話，放開送出」
-        </p>
 
-        {/* === 人設選擇（你要的：進入後先選）=== */}
+        {/* 人設 */}
         <div
           style={{
             marginTop: 16,
@@ -506,7 +448,7 @@ export default function SessionPage() {
             background: "#f8fafc",
           }}
         >
-          <div style={{ fontWeight: 700, marginBottom: 10 }}>人設設定（客戶）</div>
+          <div style={{ fontWeight: 800, marginBottom: 10 }}>人設設定（客戶）</div>
 
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
             <div>
@@ -599,132 +541,70 @@ export default function SessionPage() {
             </div>
           </div>
 
-          <div style={{ marginTop: 12, fontSize: 12, color: "#475569", lineHeight: 1.6 }}>
-            <div>✅ 你目前設定：</div>
-            <div>
-              {personaText.genderText} / {age} 歲 / {personaText.jobText} / {personaText.attitudeText}
-            </div>
-            <div>主題：{topicText}</div>
-            <div style={{ marginTop: 6 }}>
-              ⚠️ 連線中不建議改設定（需要重新開始即時對話才會生效）
-            </div>
+          <div style={{ marginTop: 10, fontSize: 12, color: "#475569", lineHeight: 1.6 }}>
+            ✅ 目前：{personaText.genderText}/{age}歲/{personaText.jobText}/{personaText.attitudeText}（{personaText.postureRule}）
           </div>
         </div>
 
-        {/* === 麥克風/連線控制 === */}
-        <div
-          style={{
-            marginTop: 16,
-            padding: 16,
-            borderRadius: 16,
-            border: "1px solid #e5e7eb",
-            background: "#ffffff",
-          }}
-        >
-          <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-            <button
-              onClick={enableMic}
-              disabled={micStatus === "requesting" || micStatus === "ready"}
-              style={{
-                padding: "10px 14px",
-                borderRadius: 999,
-                border: "none",
-                background: "#16a34a",
-                color: "white",
-                fontWeight: 700,
-                cursor: "pointer",
-                opacity: micStatus === "requesting" || micStatus === "ready" ? 0.6 : 1,
-              }}
-            >
-              啟用麥克風
-            </button>
+        {/* 控制 */}
+        <div style={{ marginTop: 16, display: "flex", gap: 10, flexWrap: "wrap" }}>
+          <button
+            onClick={enableMic}
+            disabled={micStatus === "requesting" || micStatus === "ready"}
+            style={{
+              padding: "10px 14px",
+              borderRadius: 999,
+              border: "none",
+              background: "#16a34a",
+              color: "white",
+              fontWeight: 800,
+              cursor: "pointer",
+              opacity: micStatus === "requesting" || micStatus === "ready" ? 0.6 : 1,
+            }}
+          >
+            啟用麥克風
+          </button>
 
-            <button
-              onClick={stopMic}
-              disabled={micStatus !== "ready"}
-              style={{
-                padding: "10px 14px",
-                borderRadius: 999,
-                border: "1px solid #cbd5e1",
-                background: "white",
-                fontWeight: 700,
-                cursor: "pointer",
-                opacity: micStatus !== "ready" ? 0.6 : 1,
-              }}
-            >
-              停止麥克風
-            </button>
+          <button
+            onClick={startRealtime}
+            disabled={micStatus !== "ready" || rtcStatus === "starting" || rtcStatus === "connected"}
+            style={{
+              padding: "10px 14px",
+              borderRadius: 999,
+              border: "none",
+              background: "#2563eb",
+              color: "white",
+              fontWeight: 800,
+              cursor: "pointer",
+              opacity:
+                micStatus !== "ready" || rtcStatus === "starting" || rtcStatus === "connected" ? 0.6 : 1,
+            }}
+          >
+            開始即時對話
+          </button>
 
-            <button
-              onClick={startRealtime}
-              disabled={micStatus !== "ready" || rtcStatus === "starting" || rtcStatus === "connected"}
-              style={{
-                padding: "10px 14px",
-                borderRadius: 999,
-                border: "none",
-                background: "#2563eb",
-                color: "white",
-                fontWeight: 700,
-                cursor: "pointer",
-                opacity:
-                  micStatus !== "ready" || rtcStatus === "starting" || rtcStatus === "connected" ? 0.6 : 1,
-              }}
-            >
-              開始即時對話
-            </button>
+          <button
+            onClick={endRealtime}
+            disabled={rtcStatus !== "connected" && rtcStatus !== "starting"}
+            style={{
+              padding: "10px 14px",
+              borderRadius: 999,
+              border: "1px solid #cbd5e1",
+              background: "white",
+              fontWeight: 800,
+              cursor: "pointer",
+              opacity: rtcStatus !== "connected" && rtcStatus !== "starting" ? 0.6 : 1,
+            }}
+          >
+            結束
+          </button>
 
-            <button
-              onClick={endRealtime}
-              disabled={rtcStatus !== "connected" && rtcStatus !== "starting"}
-              style={{
-                padding: "10px 14px",
-                borderRadius: 999,
-                border: "1px solid #cbd5e1",
-                background: "white",
-                fontWeight: 700,
-                cursor: "pointer",
-                opacity: rtcStatus !== "connected" && rtcStatus !== "starting" ? 0.6 : 1,
-              }}
-            >
-              結束
-            </button>
+          <div style={{ alignSelf: "center", fontSize: 13, color: "#334155" }}>
+            <strong>剩餘：</strong> {mm}:{ss}　<strong>狀態：</strong> {rtcStatus} {hasRemoteAudio ? "✅" : ""}
           </div>
-
-          <div style={{ marginTop: 10, fontSize: 13, color: "#334155", display: "flex", gap: 14, flexWrap: "wrap" }}>
-            <div>
-              <strong>Mic：</strong>
-              {micStatus === "idle" && "未啟用"}
-              {micStatus === "requesting" && "請求中…"}
-              {micStatus === "ready" && "✅ 已啟用"}
-              {micStatus === "denied" && "❌ 被拒絕"}
-              {micStatus === "error" && "⚠️ 失敗"}
-            </div>
-            <div>
-              <strong>Realtime：</strong> {rtcStatus} {hasRemoteAudio ? "✅" : ""}
-            </div>
-            <div>
-              <strong>剩餘時間：</strong> {mm}:{ss}
-            </div>
-          </div>
-
-          {micError && (
-            <pre
-              style={{
-                marginTop: 10,
-                padding: 10,
-                fontSize: 12,
-                background: "#f1f5f9",
-                borderRadius: 12,
-                whiteSpace: "pre-wrap",
-                border: "1px solid #e2e8f0",
-              }}
-            >
-              {micError}
-            </pre>
-          )}
         </div>
 
-        {/* === Push-to-talk 按鈕 === */}
+        {/* Push-to-talk */}
         <div style={{ marginTop: 16 }}>
           <button
             onPointerDown={(e) => {
@@ -740,7 +620,6 @@ export default function SessionPage() {
               pttUp();
             }}
             onPointerLeave={(e) => {
-              // 手指滑出按鈕也視為放開
               if (isHolding) {
                 e.preventDefault();
                 pttUp();
@@ -754,7 +633,7 @@ export default function SessionPage() {
               border: "none",
               background: rtcStatus === "connected" ? (isHolding ? "#0f172a" : "#111827") : "#94a3b8",
               color: "white",
-              fontWeight: 800,
+              fontWeight: 900,
               fontSize: 16,
               cursor: rtcStatus === "connected" ? "pointer" : "not-allowed",
               userSelect: "none",
@@ -764,15 +643,12 @@ export default function SessionPage() {
           >
             {rtcStatus !== "connected" ? "請先開始即時對話" : isHolding ? "放開 → 傳送給 AI" : "按住說話（Push-to-Talk）"}
           </button>
-          <div style={{ marginTop: 8, fontSize: 12, color: "#475569" }}>
-            省錢策略：只輸出語音、關閉轉寫、回覆限制 1~2 句短句。
-          </div>
         </div>
 
-        {/* === 提示區 === */}
+        {/* 提示 */}
         <div
           style={{
-            marginTop: 20,
+            marginTop: 18,
             padding: 18,
             borderRadius: 16,
             background: "#eff6ff",
@@ -781,7 +657,6 @@ export default function SessionPage() {
         >
           <strong>目前提示</strong>
           <p style={{ margin: "8px 0 0", fontSize: 18 }}>{prompts[currentPrompt]}</p>
-
           <button
             type="button"
             onClick={nextPrompt}
@@ -792,7 +667,7 @@ export default function SessionPage() {
               border: "none",
               background: "#2563eb",
               color: "white",
-              fontWeight: 700,
+              fontWeight: 800,
               cursor: "pointer",
             }}
           >
@@ -800,16 +675,16 @@ export default function SessionPage() {
           </button>
         </div>
 
-        {/* === 自我回饋 === */}
+        {/* 回饋 */}
         <div style={{ marginTop: 18 }}>
-          <label htmlFor="note" style={{ display: "block", marginBottom: 8, fontWeight: 700 }}>
+          <label htmlFor="note" style={{ display: "block", marginBottom: 8, fontWeight: 800 }}>
             今日自我回饋
           </label>
           <textarea
             id="note"
             value={note}
             onChange={(e) => setNote(e.target.value)}
-            placeholder="例：語速要再放慢一點、先問需求再講保障、不要急著約時間"
+            placeholder="例：語速要再慢、先問需求、不要急著約"
             rows={5}
             style={{
               width: "100%",
@@ -821,9 +696,9 @@ export default function SessionPage() {
           />
         </div>
 
-        {/* === 日誌（保留 debug）=== */}
+        {/* 日誌 */}
         <div style={{ marginTop: 18 }}>
-          <div style={{ fontWeight: 800, marginBottom: 8 }}>連線日誌（Debug）</div>
+          <div style={{ fontWeight: 900, marginBottom: 8 }}>連線日誌（Debug）</div>
           <div
             style={{
               border: "1px solid #0b1220",
