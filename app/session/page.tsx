@@ -35,6 +35,7 @@ export default function SessionPage() {
     log("Mic ready ✅");
   }
 
+  // 關鍵修改點1：buildPersona函數保持不變，但我們會在不同地方使用它
   function buildPersona() {
     return `
 你是【台灣的保險客戶】，不是業務員。
@@ -79,7 +80,6 @@ ${topic === "relationship" ? "客情培養" : ""}
     const pc = new RTCPeerConnection();
     pcRef.current = pc;
 
-    // ⚠️ 關鍵：一開始先靜音
     const audio = document.createElement("audio");
     audio.autoplay = true;
     audio.muted = true;
@@ -99,6 +99,8 @@ ${topic === "relationship" ? "客情培養" : ""}
     dc.onopen = () => {
       log("DataChannel open ✅");
 
+      // 關鍵修改點2：在session.update中設定完整的persona
+      // 這是AI的基礎身份設定
       dc.send(
         JSON.stringify({
           type: "session.update",
@@ -107,18 +109,34 @@ ${topic === "relationship" ? "客情培養" : ""}
             voice: "alloy",
             instructions: buildPersona(),
             max_output_tokens: 60,
+            // 可選：如果你想要更精確的控制，可以加上這行
+            // turn_detection: null,
           },
         })
       );
 
       personaReadyRef.current = true;
-      audio.muted = false; // ✅ 現在才允許聽到 AI
+      audio.muted = false;
       log("Persona injected & audio unmuted ✅");
     };
 
+    // 關鍵修改點3：加強事件監聽，幫助你診斷問題
     dc.onmessage = (e) => {
       const data = JSON.parse(e.data);
-      if (data.type === "response.done") log("AI responded ✅");
+      
+      // 記錄所有重要事件
+      if (data.type === "session.updated") {
+        log("Session updated confirmed ✅");
+      }
+      
+      if (data.type === "response.done") {
+        log("AI responded ✅");
+      }
+      
+      // 如果有錯誤，立刻顯示
+      if (data.type === "error") {
+        log("❌ Error: " + JSON.stringify(data.error));
+      }
     };
 
     const offer = await pc.createOffer();
@@ -147,20 +165,40 @@ ${topic === "relationship" ? "客情培養" : ""}
     log("🎙️ 開始說話");
   }
 
+  // 關鍵修改點4：這是整個方案三的核心修改
+  // 我們有兩個版本讓你選擇
   function stopTalk() {
     if (!dcRef.current || !personaReadyRef.current) return;
 
     log("📡 傳送給 AI");
 
+    // 版本A：完全移除instructions，讓AI依賴session層級的設定
+    // 這是最簡潔的做法，也是我建議你先測試的版本
     dcRef.current.send(
       JSON.stringify({
         type: "response.create",
         response: {
           modalities: ["audio", "text"],
-          instructions: "請依角色簡短回應。",
+          // 注意：這裡完全沒有instructions欄位
+          // AI會使用你在session.update中設定的完整persona
         },
       })
     );
+
+    // 版本B：如果版本A還是不夠，就用這個版本
+    // 在每次回應時重複提醒AI的完整身份
+    // 使用這個版本時，請把上面的版本A註解掉
+    /*
+    dcRef.current.send(
+      JSON.stringify({
+        type: "response.create",
+        response: {
+          modalities: ["audio", "text"],
+          instructions: buildPersona() + "\n\n現在請依照以上角色設定簡短回應。",
+        },
+      })
+    );
+    */
   }
 
   function endRealtime() {
