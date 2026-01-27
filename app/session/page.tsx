@@ -1,24 +1,19 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useRef, useState } from "react";
 import Link from "next/link";
 
-/* ======================
-   人設型別（不要動）
-====================== */
 type Gender = "male" | "female";
 type Attitude = "neutral" | "skeptical" | "data_only" | "avoidant";
 type Topic = "phone_invite" | "product_marketing" | "relationship";
 
 export default function SessionPage() {
-  /* ===== 人設設定 ===== */
   const [gender, setGender] = useState<Gender>("male");
   const [age, setAge] = useState(38);
   const [job, setJob] = useState("工廠技術人員");
   const [attitude, setAttitude] = useState<Attitude>("neutral");
   const [topic, setTopic] = useState<Topic>("phone_invite");
 
-  /* ===== 系統狀態 ===== */
   const [micReady, setMicReady] = useState(false);
   const [connected, setConnected] = useState(false);
   const [logLines, setLogLines] = useState<string[]>([]);
@@ -27,63 +22,50 @@ export default function SessionPage() {
   const pcRef = useRef<RTCPeerConnection | null>(null);
   const dcRef = useRef<RTCDataChannel | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const personaReadyRef = useRef(false);
 
-  const sessionTimerRef = useRef<NodeJS.Timeout | null>(null);
-
-  /* ===== Log 工具 ===== */
   function log(msg: string) {
-    setLogLines((prev) => {
-      const line = `[${new Date().toLocaleTimeString()}] ${msg}`;
-      return [line, ...prev].slice(0, 120);
-    });
+    setLogLines((p) => [`[${new Date().toLocaleTimeString()}] ${msg}`, ...p].slice(0, 120));
   }
 
-  /* ===== 麥克風 ===== */
   async function enableMic() {
-    const stream = await navigator.mediaDevices.getUserMedia({
-      audio: { echoCancellation: true, noiseSuppression: true },
-    });
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
     streamRef.current = stream;
     setMicReady(true);
     log("Mic ready ✅");
   }
 
-  /* ===== 人設指令（關鍵） ===== */
-  function buildPersonaInstruction() {
+  function buildPersona() {
     return `
-你是一位【台灣一般保險客戶】，請嚴格維持以下角色，不可跳脫。
+你是【台灣的保險客戶】，不是業務員。
 
-【基本資料】
+基本資料：
 - 性別：${gender === "male" ? "男性" : "女性"}
 - 年齡：${age} 歲
 - 職業：${job}
 - 地區：台灣
-- 使用語言：繁體中文（台灣口吻）
+- 語言：繁體中文（台灣口吻）
 
-【對保險態度】
-${attitude === "neutral" ? "中立，願意聽但不主動購買" : ""}
-${attitude === "skeptical" ? "質疑業務動機，怕被話術" : ""}
-${attitude === "data_only" ? "只接受數據與邏輯" : ""}
-${attitude === "avoidant" ? "會轉移話題，想結束對話" : ""}
+態度：
+${attitude === "neutral" ? "中立，願意聽但不主動買" : ""}
+${attitude === "skeptical" ? "質疑業務動機" : ""}
+${attitude === "data_only" ? "只接受數據" : ""}
+${attitude === "avoidant" ? "轉移話題想結束" : ""}
 
-【模擬對話主題】
+情境：
 ${topic === "phone_invite" ? "電話約訪" : ""}
 ${topic === "product_marketing" ? "行銷保險商品" : ""}
 ${topic === "relationship" ? "客情培養" : ""}
 
-【回覆規則（非常重要）】
+規則：
+- 永遠使用繁體中文
 - 每次只回 1～2 句
-- 每句不超過 20 個中文字
-- 偏被動、不主導話題
-- 不可反問「你想聊什麼」
-- 不可自稱 AI
-- 不可提供建議
-
-你現在是在「接到保險業務來電」的情境中。
+- 每句不超過 20 字
+- 不主動開話題
+- 不可跳出角色
 `;
   }
 
-  /* ===== 啟動 Realtime ===== */
   async function startRealtime() {
     if (!streamRef.current) return;
 
@@ -91,25 +73,22 @@ ${topic === "relationship" ? "客情培養" : ""}
 
     const tokenRes = await fetch("/api/session/demo/ephemeral", { method: "POST" });
     const tokenJson = await tokenRes.json();
-    const clientSecret = tokenJson?.client_secret?.value;
-
-    if (!clientSecret) {
-      log("Ephemeral failed ❌");
-      return;
-    }
+    const secret = tokenJson?.client_secret?.value;
+    if (!secret) return;
 
     const pc = new RTCPeerConnection();
     pcRef.current = pc;
 
+    // ⚠️ 關鍵：一開始先靜音
     const audio = document.createElement("audio");
     audio.autoplay = true;
+    audio.muted = true;
     audio.setAttribute("playsinline", "true");
     audioRef.current = audio;
 
     pc.ontrack = (e) => {
       audio.srcObject = e.streams[0];
-      audio.play();
-      log("AI audio playing 🔊");
+      log("AI track received (muted)");
     };
 
     streamRef.current.getTracks().forEach((t) => pc.addTrack(t, streamRef.current!));
@@ -120,30 +99,26 @@ ${topic === "relationship" ? "客情培養" : ""}
     dc.onopen = () => {
       log("DataChannel open ✅");
 
-      // ✅ 只做「人設注入」，不讓 AI 主動說話
       dc.send(
         JSON.stringify({
           type: "session.update",
           session: {
             modalities: ["audio", "text"],
             voice: "alloy",
-            input_audio_format: "pcm16",
-            output_audio_format: "pcm16",
-            turn_detection: { type: "server_vad" },
-            instructions: buildPersonaInstruction(),
+            instructions: buildPersona(),
             max_output_tokens: 60,
           },
         })
       );
 
-      log("Persona injected ✅");
+      personaReadyRef.current = true;
+      audio.muted = false; // ✅ 現在才允許聽到 AI
+      log("Persona injected & audio unmuted ✅");
     };
 
     dc.onmessage = (e) => {
       const data = JSON.parse(e.data);
-      if (data.type === "response.done") {
-        log("AI responded (completed) ✅");
-      }
+      if (data.type === "response.done") log("AI responded ✅");
     };
 
     const offer = await pc.createOffer();
@@ -154,7 +129,7 @@ ${topic === "relationship" ? "客情培養" : ""}
       {
         method: "POST",
         headers: {
-          Authorization: `Bearer ${clientSecret}`,
+          Authorization: `Bearer ${secret}`,
           "Content-Type": "application/sdp",
         },
         body: offer.sdp,
@@ -166,18 +141,14 @@ ${topic === "relationship" ? "客情培養" : ""}
 
     setConnected(true);
     log("Realtime connected ✅");
-
-    sessionTimerRef.current = setTimeout(endRealtime, 6 * 60 * 1000);
   }
 
-  /* ===== Push-to-Talk ===== */
   function startTalk() {
-    if (!connected || !dcRef.current) return;
     log("🎙️ 開始說話");
   }
 
   function stopTalk() {
-    if (!connected || !dcRef.current) return;
+    if (!dcRef.current || !personaReadyRef.current) return;
 
     log("📡 傳送給 AI");
 
@@ -186,7 +157,7 @@ ${topic === "relationship" ? "客情培養" : ""}
         type: "response.create",
         response: {
           modalities: ["audio", "text"],
-          instructions: "請依角色，用一句話簡短回應。",
+          instructions: "請依角色簡短回應。",
         },
       })
     );
@@ -195,21 +166,17 @@ ${topic === "relationship" ? "客情培養" : ""}
   function endRealtime() {
     dcRef.current?.close();
     pcRef.current?.close();
-    sessionTimerRef.current && clearTimeout(sessionTimerRef.current);
     setConnected(false);
     log("Session ended ⛔");
   }
 
-  /* ===== UI ===== */
   return (
     <main style={{ maxWidth: 900, margin: "0 auto", padding: 32 }}>
       <Link href="/">← 回首頁</Link>
 
-      <h1 style={{ marginTop: 24 }}>保險語音模擬訓練</h1>
+      <h1>保險語音模擬</h1>
 
-      <section style={{ marginTop: 24 }}>
-        <h3>模擬對象設定</h3>
-
+      <section>
         <select value={gender} onChange={(e) => setGender(e.target.value as Gender)}>
           <option value="male">男性</option>
           <option value="female">女性</option>
@@ -220,19 +187,19 @@ ${topic === "relationship" ? "客情培養" : ""}
 
         <select value={attitude} onChange={(e) => setAttitude(e.target.value as Attitude)}>
           <option value="neutral">中立</option>
-          <option value="skeptical">質疑動機</option>
-          <option value="data_only">只要數據</option>
+          <option value="skeptical">質疑</option>
+          <option value="data_only">只看數據</option>
           <option value="avoidant">轉移話題</option>
         </select>
 
         <select value={topic} onChange={(e) => setTopic(e.target.value as Topic)}>
           <option value="phone_invite">電話約訪</option>
-          <option value="product_marketing">行銷商品</option>
+          <option value="product_marketing">商品行銷</option>
           <option value="relationship">客情培養</option>
         </select>
       </section>
 
-      <section style={{ marginTop: 24 }}>
+      <section style={{ marginTop: 16 }}>
         {!micReady && <button onClick={enableMic}>啟用麥克風</button>}
         {micReady && !connected && <button onClick={startRealtime}>開始模擬</button>}
         {connected && (
@@ -245,12 +212,9 @@ ${topic === "relationship" ? "客情培養" : ""}
         )}
       </section>
 
-      <section style={{ marginTop: 24 }}>
-        <h3>系統日誌</h3>
-        <pre style={{ background: "#111", color: "#0f0", padding: 12, height: 240, overflow: "auto" }}>
-          {logLines.join("\n")}
-        </pre>
-      </section>
+      <pre style={{ marginTop: 24, background: "#111", color: "#0f0", padding: 12 }}>
+        {logLines.join("\n")}
+      </pre>
     </main>
   );
 }
