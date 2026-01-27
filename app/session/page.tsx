@@ -108,9 +108,6 @@ ${topic === "relationship" ? "客情培養" : ""}
             modalities: ["audio", "text"],
             voice: "alloy",
             instructions: buildPersona(),
-            max_output_tokens: 60,
-            // 可選：如果你想要更精確的控制，可以加上這行
-            // turn_detection: null,
           },
         })
       );
