@@ -1,787 +1,321 @@
 "use client";
 
+import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
-import { useEffect, useMemo, useRef, useState } from "react";
 
-type MicStatus = "idle" | "requesting" | "ready" | "denied" | "error";
-type RtcStatus = "idle" | "starting" | "connected" | "failed" | "ended";
+/* =========================
+   Persona 型別
+========================= */
+type Gender = "male" | "female";
+type Attitude =
+  | "neutral"
+  | "skeptical"
+  | "data_only"
+  | "avoidant";
+type Topic =
+  | "phone_invite"
+  | "product_marketing"
+  | "relationship";
 
-type PersonaGender = "male" | "female";
-type PersonaAge = "28" | "38" | "45" | "55";
-type PersonaJob = "factory" | "office" | "self_employed" | "teacher" | "healthcare";
-type PersonaAttitude = "neutral" | "skeptical" | "price_sensitive" | "already_has" | "avoid_talk";
-type PersonaPosture = "doubt_motive" | "cant_refuse" | "data_only" | "change_topic";
-type SimTopic = "appointment" | "product" | "relationship";
-
-const prompts = [
-  "用一句話向客戶自我介紹，說明你是專業保險顧問。",
-  "詢問客戶目前最在意的保障需求是什麼。",
-  "簡短說明這份保單能解決的風險與保障特色。",
-];
-
-function nowTime() {
-  return new Date().toLocaleTimeString();
-}
-function sleep(ms: number) {
-  return new Promise((r) => setTimeout(r, ms));
-}
-
+/* =========================
+   Page Component
+========================= */
 export default function SessionPage() {
-  const [currentPrompt, setCurrentPrompt] = useState(0);
-  const [note, setNote] = useState("");
+  /* ---------- Persona 設定 ---------- */
+  const [gender, setGender] = useState<Gender>("male");
+  const [age, setAge] = useState(38);
+  const [job, setJob] = useState("工廠技術人員");
+  const [attitude, setAttitude] = useState<Attitude>("neutral");
+  const [topic, setTopic] = useState<Topic>("phone_invite");
 
-  // 人設
-  const [gender, setGender] = useState<PersonaGender>("male");
-  const [age, setAge] = useState<PersonaAge>("38");
-  const [job, setJob] = useState<PersonaJob>("factory");
-  const [attitude, setAttitude] = useState<PersonaAttitude>("neutral");
-  const [posture, setPosture] = useState<PersonaPosture>("doubt_motive");
-  const [topic, setTopic] = useState<SimTopic>("appointment");
-
-  // mic
-  const [micStatus, setMicStatus] = useState<MicStatus>("idle");
-  const [micError, setMicError] = useState("");
+  /* ---------- Mic / RTC 狀態 ---------- */
+  const [micReady, setMicReady] = useState(false);
   const streamRef = useRef<MediaStream | null>(null);
-
-  // rtc
   const pcRef = useRef<RTCPeerConnection | null>(null);
   const dcRef = useRef<RTCDataChannel | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
 
-  const [rtcStatus, setRtcStatus] = useState<RtcStatus>("idle");
-  const [hasRemoteAudio, setHasRemoteAudio] = useState(false);
-
-  // debug log
+  const [connected, setConnected] = useState(false);
   const [logLines, setLogLines] = useState<string[]>([]);
+  const talkStartRef = useRef<number | null>(null);
+  const sessionTimerRef = useRef<NodeJS.Timeout | null>(null);
+
+  /* =========================
+     Utils
+  ========================= */
   function log(msg: string) {
     setLogLines((prev) => {
-      const line = `[${nowTime()}] ${msg}`;
-      return [line, ...prev].slice(0, 260);
+      const line = `[${new Date().toLocaleTimeString()}] ${msg}`;
+      return [line, ...prev].slice(0, 120);
     });
   }
 
-  // push-to-talk
-  const [isHolding, setIsHolding] = useState(false);
-
-  // 6 minutes limit
-  const LIMIT_SEC = 6 * 60;
-  const [remainingSec, setRemainingSec] = useState<number>(LIMIT_SEC);
-  const timerRef = useRef<number | null>(null);
-
-  // wait-for event
-  const waitersRef = useRef<Map<string, { resolve: () => void; reject: (e: any) => void }>>(
-    new Map()
-  );
-
-  const nextPrompt = () => setCurrentPrompt((p) => (p + 1) % prompts.length);
-
-  const topicText = useMemo(() => {
-    switch (topic) {
-      case "appointment":
-        return "電話約訪：你剛接到保險顧問來電，對方想約你見面。你可拒絕或保留。";
-      case "product":
-        return "行銷保險商品：對方介紹商品，你會問費用/保障/理賠條件，用短句回。";
-      case "relationship":
-        return "客情培養：對方以關心服務為主，你會聊天但保留界線，觀察動機。";
-      default:
-        return "";
-    }
-  }, [topic]);
-
-  const personaText = useMemo(() => {
-    const genderText = gender === "male" ? "男" : "女";
-    const jobMap: Record<PersonaJob, string> = {
-      factory: "工廠/製造業",
-      office: "一般上班族",
-      self_employed: "自營/小店老闆",
-      teacher: "教育相關",
-      healthcare: "醫療相關",
-    };
-    const attitudeMap: Record<PersonaAttitude, string> = {
-      neutral: "中立：願意聽但不喜歡被推銷",
-      skeptical: "懷疑：怕被話術、會質疑動機",
-      price_sensitive: "價格敏感：很在意保費負擔",
-      already_has: "已有保單：覺得自己差不多夠了",
-      avoid_talk: "抗拒：不想談保險、想結束對話",
-    };
-    const postureMap: Record<PersonaPosture, string> = {
-      doubt_motive: "姿態：質疑業務動機（常問是不是要賣我）。",
-      cant_refuse: "姿態：不敢拒絕但不答應（常說我再看看/問家人）。",
-      data_only: "姿態：只要數據與邏輯（追問保障/保費/條件）。",
-      change_topic: "姿態：轉移話題/敷衍（想快結束）。",
-    };
-
-    return {
-      genderText,
-      jobText: jobMap[job],
-      attitudeText: attitudeMap[attitude],
-      postureRule: postureMap[posture],
-    };
-  }, [gender, job, attitude, posture]);
-
-  // 超短 reminder：每回合都塞，防漂移
-  const personaReminder = useMemo(() => {
-    return `你=台灣保險客戶；${personaText.genderText}${age}歲；${personaText.jobText}；${personaText.attitudeText}；${personaText.postureRule}；主題：${topicText}；永遠繁中；每次最多2句、每句<=18字、總<=36字；禁止問「想聊什麼」；被問人設就反問。`;
-  }, [personaText, age, topicText]);
-
-  // 第一次 session.update 用（較長）
-  const systemInstructions = useMemo(() => {
-    return [
-      "【語言】永遠繁體中文（台灣用語），不得英文/簡體。",
-      "【身份】你是台灣一般民眾『保險客戶』，不是助理。",
-      "【禁止】不要問『你想聊什麼』、『今天聊什麼』。",
-      "【短句省錢】每次回覆最多 2 句；每句<=18字；總<=36字；不要列點；不要長解釋。",
-      `【主題】${topicText}`,
-      `【人設】性別${personaText.genderText}，年齡${age}，職業${personaText.jobText}。`,
-      `【看法】${personaText.attitudeText}`,
-      `【姿態(隱藏)】${personaText.postureRule}`,
-      "【反防呆】若使用者問『你的人設是什麼』，你要像客戶回：『你問這個幹嘛？你要講重點嗎？』不可跳出角色。",
-      "【開場固定句】連線成功後，你必須只回這一句：『你好，你是做保險的喔？』",
-    ].join("\n");
-  }, [topicText, personaText, age]);
-
+  /* =========================
+     Mic
+  ========================= */
   async function enableMic() {
-    setMicError("");
-    setMicStatus("requesting");
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: { echoCancellation: true, noiseSuppression: true },
-      });
-      streamRef.current = stream;
-      setMicStatus("ready");
-      log("Mic ready ✅");
-    } catch (err: any) {
-      const name = err?.name || "UnknownError";
-      setMicStatus(name === "NotAllowedError" ? "denied" : "error");
-      setMicError(`${name}: ${err?.message || String(err)}`);
-      log(`Mic error ❌ ${name}`);
-    }
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: true, noiseSuppression: true },
+    });
+    streamRef.current = stream;
+    setMicReady(true);
+    log("Mic ready ✅");
   }
 
   function stopMic() {
-    const stream = streamRef.current;
-    if (stream) {
-      stream.getTracks().forEach((t) => t.stop());
-      streamRef.current = null;
-    }
-    setMicStatus("idle");
-    setMicError("");
+    streamRef.current?.getTracks().forEach((t) => t.stop());
+    streamRef.current = null;
+    setMicReady(false);
     log("Mic stopped");
   }
 
-  function startTimer() {
-    setRemainingSec(LIMIT_SEC);
-    if (timerRef.current) window.clearInterval(timerRef.current);
-    timerRef.current = window.setInterval(() => {
-      setRemainingSec((prev) => {
-        const next = prev - 1;
-        if (next <= 0) {
-          log("⏱️ 已達 6 分鐘上限，自動結束");
-          endRealtime();
-          return 0;
-        }
-        return next;
-      });
-    }, 1000);
+  /* =========================
+     Persona System Prompt
+  ========================= */
+  function buildPersonaInstruction() {
+    const attitudeMap: Record<Attitude, string> = {
+      neutral: "中立，願意聽但不主動想買",
+      skeptical: "質疑業務動機，怕被話術",
+      data_only: "只接受數據與邏輯",
+      avoidant: "會轉移話題，想結束對話",
+    };
+
+    const topicMap: Record<Topic, string> = {
+      phone_invite: "電話約訪",
+      product_marketing: "行銷保險商品",
+      relationship: "客情培養",
+    };
+
+    return `
+你正在模擬一位【台灣的保險客戶】，請嚴格維持角色，不要跳出設定。
+
+【基本人設】
+- 性別：${gender === "male" ? "男性" : "女性"}
+- 年齡：${age} 歲
+- 職業：${job}
+- 地區：台灣
+- 使用語言：繁體中文（台灣用語）
+
+【對保險態度】
+- ${attitudeMap[attitude]}
+
+【模擬對話主題】
+- ${topicMap[topic]}
+
+【人格互動姿態（隱性）】
+- 不主動延續話題
+- 不給建議
+- 不主導對話
+- 不扮演保險業務員
+
+【回覆限制（非常重要）】
+- 每次只回 1～2 句
+- 每句不超過 20 個中文字
+- 簡短、口語、偏被動
+
+【禁止事項】
+- 不可自稱 AI
+- 不可跳出角色
+- 不可詢問「你想聊什麼」
+`;
   }
 
-  function cleanupRealtime() {
-    if (timerRef.current) {
-      window.clearInterval(timerRef.current);
-      timerRef.current = null;
-    }
-    setRemainingSec(LIMIT_SEC);
-    setIsHolding(false);
-
-    try {
-      dcRef.current?.close();
-    } catch {}
-    dcRef.current = null;
-
-    try {
-      pcRef.current?.close();
-    } catch {}
-    pcRef.current = null;
-
-    try {
-      const a = audioRef.current;
-      if (a) {
-        a.pause();
-        // @ts-ignore
-        a.srcObject = null;
-      }
-    } catch {}
-    audioRef.current = null;
-
-    setHasRemoteAudio(false);
-
-    // clear waiters
-    waitersRef.current.clear();
-  }
-
-  function endRealtime() {
-    cleanupRealtime();
-    setRtcStatus("ended");
-    log("Session ended ⛔");
-  }
-
-  function setMicTrackEnabled(enabled: boolean) {
-    const stream = streamRef.current;
-    if (!stream) return;
-    stream.getAudioTracks().forEach((t) => (t.enabled = enabled));
-  }
-
-  function waitFor(type: string, timeoutMs = 2500) {
-    return new Promise<void>((resolve, reject) => {
-      const key = `${type}:${Date.now()}:${Math.random()}`;
-      const timer = window.setTimeout(() => {
-        waitersRef.current.delete(key);
-        reject(new Error(`waitFor timeout: ${type}`));
-      }, timeoutMs);
-      waitersRef.current.set(key, {
-        resolve: () => {
-          window.clearTimeout(timer);
-          waitersRef.current.delete(key);
-          resolve();
-        },
-        reject: (e) => {
-          window.clearTimeout(timer);
-          waitersRef.current.delete(key);
-          reject(e);
-        },
-      });
-
-      // 我們用 key 存，但觸發時會掃一遍同 type 的 waiter
-      (waitersRef.current as any)._wantedType = type;
-    });
-  }
-
-  function resolveWaitersForType(type: string) {
-    // 把所有等待同 type 的 resolve 掃掉
-    for (const [k, v] of waitersRef.current.entries()) {
-      const wantedType = (waitersRef.current as any)._wantedType;
-      if (wantedType === type) {
-        v.resolve();
-      }
-    }
-    // 重置 wantedType 避免誤觸
-    (waitersRef.current as any)._wantedType = null;
-  }
-
+  /* =========================
+     Realtime Start
+  ========================= */
   async function startRealtime() {
-    if (!streamRef.current) {
-      alert("請先啟用麥克風");
+    if (!streamRef.current) return;
+
+    log("Starting realtime…");
+
+    const tokenRes = await fetch("/api/session/demo/ephemeral", {
+      method: "POST",
+    });
+    const tokenJson = await tokenRes.json();
+    const clientSecret = tokenJson?.client_secret?.value;
+    if (!clientSecret) {
+      log("Ephemeral failed ❌");
       return;
     }
 
-    cleanupRealtime();
-    setRtcStatus("starting");
-    setHasRemoteAudio(false);
-    log("Starting realtime…");
+    const pc = new RTCPeerConnection();
+    pcRef.current = pc;
 
-    try {
-      const tokenRes = await fetch("/api/session/demo/ephemeral", { method: "POST" });
-      const tokenJson = await tokenRes.json().catch(() => ({}));
-      if (!tokenRes.ok) {
-        log(`Ephemeral error ❌: ${JSON.stringify(tokenJson).slice(0, 260)}`);
-        setRtcStatus("failed");
-        return;
-      }
-      const clientSecret = tokenJson?.client_secret?.value;
-      if (!clientSecret) {
-        log("Ephemeral missing client_secret.value ❌");
-        setRtcStatus("failed");
-        return;
-      }
-      log("Ephemeral OK ✅");
+    const audio = document.createElement("audio");
+    audio.autoplay = true;
+    audio.setAttribute("playsinline", "true");
+    audioRef.current = audio;
 
-      const pc = new RTCPeerConnection();
-      pcRef.current = pc;
+    pc.ontrack = (e) => {
+      audio.srcObject = e.streams[0];
+      audio.play();
+      log("AI audio playing 🔊");
+    };
 
-      pc.onconnectionstatechange = () => {
-        if (pc.connectionState === "connected") setRtcStatus("connected");
-        if (pc.connectionState === "failed") setRtcStatus("failed");
-        if (pc.connectionState === "closed") setRtcStatus("ended");
-        log(`pc.connectionState=${pc.connectionState}`);
-      };
+    streamRef.current.getTracks().forEach((t) => pc.addTrack(t, streamRef.current!));
 
-      const dc = pc.createDataChannel("oai-events");
-      dcRef.current = dc;
+    const dc = pc.createDataChannel("oai-events");
+    dcRef.current = dc;
 
-      // ✅ 重要：把 DC 事件印回來，才能知道 session.update 是否真的生效
-      dc.onmessage = (evt) => {
-        try {
-          const data = JSON.parse(String(evt.data || "{}"));
-          const t = data?.type || "unknown";
-          log(`DC event: ${t}`);
+    dc.onopen = () => {
+      log("DataChannel open ✅");
 
-          // 只對關鍵事件印 detail（避免爆版）
-          if (
-            t === "session.updated" ||
-            t === "session.created" ||
-            t === "response.done" ||
-            t === "response.created" ||
-            t.includes("error") ||
-            t.includes("failed") ||
-            t.includes("rate_limits")
-          ) {
-            log(`DC detail: ${JSON.stringify(data).slice(0, 380)}`);
-          }
-
-          if (t === "session.updated") resolveWaitersForType("session.updated");
-        } catch {
-          const text = String(evt.data || "");
-          log(text.length > 120 ? "DC msg: (large payload)" : `DC msg: ${text}`);
-        }
-      };
-
-      dc.onopen = async () => {
-        log("DataChannel open ✅");
-
-        // ✅ session.update：只 audio、關掉 transcription
-        const sessionUpdate = {
+      dc.send(
+        JSON.stringify({
           type: "session.update",
           session: {
-            modalities: ["audio"],
-            voice: gender === "male" ? "alloy" : "verse",
+            modalities: ["audio", "text"],
+            voice: "alloy",
             input_audio_format: "pcm16",
             output_audio_format: "pcm16",
-            // 關掉轉寫
-            input_audio_transcription: null,
-            // 這裡保留 server_vad 也行，但你要 PTT 我們就不靠它
-            turn_detection: null,
-            instructions: systemInstructions,
+            turn_detection: { type: "server_vad" },
+            instructions: buildPersonaInstruction(),
+            max_output_tokens: 60,
           },
-        };
+        })
+      );
 
-        dc.send(JSON.stringify(sessionUpdate));
-        log("Sent session.update ✅ (waiting session.updated…)");
+      log("Persona injected ✅");
 
-        // ✅ 一定要等到 session.updated，才開始開場
-        try {
-          await waitFor("session.updated", 3000);
-          log("session.updated ✅ (persona should be active now)");
-        } catch (e: any) {
-          log(`⚠️ No session.updated: ${String(e)} (仍嘗試開場)`);
-        }
+      // 開場固定一句，避免亂語言
+      dc.send(
+        JSON.stringify({
+          type: "response.create",
+          response: {
+            modalities: ["audio", "text"],
+            instructions: "請以角色身份，用一句話回應來電。",
+          },
+        })
+      );
+    };
 
-        // ✅ 硬驗證：強制開場句（如果沒照念＝指令沒吃到）
-        dc.send(
-          JSON.stringify({
-            type: "response.create",
-            response: {
-              modalities: ["audio"],
-              max_output_tokens: 40,
-              temperature: 0.2,
-              instructions:
-                personaReminder +
-                "。你必須只回這一句：『你好，你是做保險的喔？』(逐字照念，不能多字)。",
-            },
-          })
-        );
-        log("AI opening… 🔊 (should say fixed sentence)");
+    dc.onmessage = (e) => {
+      const data = JSON.parse(e.data);
+      if (data.type === "response.done") {
+        log("AI responded (completed) ✅");
+      }
+    };
 
-        startTimer();
-      };
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
 
-      dc.onclose = () => log("DataChannel closed");
-      dc.onerror = () => log("DataChannel error ❌");
-
-      // audio output
-      const audio = document.createElement("audio");
-      audio.autoplay = true;
-      audio.setAttribute("playsinline", "true");
-      audio.muted = false;
-      audio.volume = 1;
-      audioRef.current = audio;
-
-      pc.ontrack = (event) => {
-        setHasRemoteAudio(true);
-        audio.srcObject = event.streams[0];
-        audio
-          .play()
-          .then(() => log("AI audio playing 🔊"))
-          .catch((e) => log(`audio.play blocked: ${String(e)}`));
-      };
-
-      // local tracks default OFF (PTT)
-      streamRef.current.getTracks().forEach((track) => {
-        track.enabled = false;
-        pc.addTrack(track, streamRef.current!);
-      });
-
-      const offer = await pc.createOffer();
-      await pc.setLocalDescription(offer);
-
-      const model = "gpt-4o-realtime-preview";
-      const sdpRes = await fetch(`https://api.openai.com/v1/realtime?model=${model}`, {
+    const sdpRes = await fetch(
+      "https://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview",
+      {
         method: "POST",
         headers: {
           Authorization: `Bearer ${clientSecret}`,
           "Content-Type": "application/sdp",
         },
         body: offer.sdp,
-      });
-
-      if (!sdpRes.ok) {
-        const errText = await sdpRes.text();
-        log(`Realtime SDP error ❌: ${errText.slice(0, 320)}`);
-        setRtcStatus("failed");
-        return;
       }
+    );
 
-      const answerSdp = await sdpRes.text();
-      await pc.setRemoteDescription({ type: "answer", sdp: answerSdp });
-      log("Realtime connected ✅");
-    } catch (e: any) {
-      log(`Start realtime failed ❌: ${String(e)}`);
-      setRtcStatus("failed");
-    }
+    const answer = await sdpRes.text();
+    await pc.setRemoteDescription({ type: "answer", sdp: answer });
+
+    setConnected(true);
+    log("Realtime connected ✅");
+
+    // 6 分鐘自動結束
+    sessionTimerRef.current = setTimeout(() => {
+      endRealtime();
+    }, 6 * 60 * 1000);
   }
 
-  function pttDown() {
-    if (rtcStatus !== "connected") {
-      alert("請先開始即時對話");
-      return;
-    }
-    if (!dcRef.current || dcRef.current.readyState !== "open") {
-      alert("DataChannel 未就緒");
-      return;
-    }
-    setIsHolding(true);
-    setMicTrackEnabled(true);
+  function endRealtime() {
+    dcRef.current?.close();
+    pcRef.current?.close();
+    sessionTimerRef.current && clearTimeout(sessionTimerRef.current);
+    setConnected(false);
+    log("Session ended ⛔");
+  }
+
+  /* =========================
+     Push-to-Talk
+  ========================= */
+  function startTalk() {
+    if (!connected || !dcRef.current) return;
+    talkStartRef.current = Date.now();
     log("🎙️ 開始說話");
   }
 
-  function pttUp() {
-    if (rtcStatus !== "connected") return;
-    setIsHolding(false);
-    setMicTrackEnabled(false);
+  function stopTalk() {
+    if (!connected || !dcRef.current) return;
+    if (!talkStartRef.current) return;
 
-    // ✅ 每回合都塞 persona reminder，逼它不要漂移
-    try {
-      dcRef.current?.send(
-        JSON.stringify({
-          type: "response.create",
-          response: {
-            modalities: ["audio"],
-            max_output_tokens: 80,
-            temperature: 0.3,
-            instructions: personaReminder,
-          },
-        })
-      );
-      log("📡 傳送給 AI");
-    } catch (e: any) {
-      log(`Send failed ❌: ${String(e)}`);
-    }
+    talkStartRef.current = null;
+    log("📡 傳送給 AI");
+
+    dcRef.current.send(
+      JSON.stringify({
+        type: "response.create",
+        response: {
+          modalities: ["audio", "text"],
+          instructions: "請以角色身份簡短回應。",
+        },
+      })
+    );
   }
 
-  useEffect(() => {
-    return () => cleanupRealtime();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  const mm = String(Math.floor(remainingSec / 60)).padStart(2, "0");
-  const ss = String(remainingSec % 60).padStart(2, "0");
-
+  /* =========================
+     UI
+  ========================= */
   return (
-    <main style={{ maxWidth: 960, margin: "0 auto", padding: "48px 24px" }}>
-      <Link href="/" style={{ color: "#2563eb", textDecoration: "none" }}>
-        ← 回到首頁
-      </Link>
+    <main style={{ maxWidth: 900, margin: "0 auto", padding: 32 }}>
+      <Link href="/">← 回首頁</Link>
 
-      <section
-        style={{
-          marginTop: 24,
-          background: "white",
-          padding: 32,
-          borderRadius: 24,
-          boxShadow: "0 20px 40px rgba(15, 23, 42, 0.08)",
-        }}
-      >
-        <h1 style={{ marginTop: 0 }}>語音模擬對話（MVP）</h1>
+      <h1 style={{ marginTop: 24 }}>保險業務語音模擬</h1>
 
-        {/* 人設 */}
-        <div
-          style={{
-            marginTop: 16,
-            padding: 16,
-            borderRadius: 16,
-            border: "1px solid #e5e7eb",
-            background: "#f8fafc",
-          }}
-        >
-          <div style={{ fontWeight: 800, marginBottom: 10 }}>人設設定（客戶）</div>
+      {/* Persona */}
+      <section style={{ marginTop: 24 }}>
+        <h3>模擬對象設定</h3>
 
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-            <div>
-              <label style={{ display: "block", fontSize: 12, color: "#334155" }}>性別</label>
-              <select
-                value={gender}
-                onChange={(e) => setGender(e.target.value as PersonaGender)}
-                style={{ width: "100%", padding: 10, borderRadius: 10, border: "1px solid #cbd5e1" }}
-                disabled={rtcStatus === "connected" || rtcStatus === "starting"}
-              >
-                <option value="male">男</option>
-                <option value="female">女</option>
-              </select>
-            </div>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+          <select value={gender} onChange={(e) => setGender(e.target.value as Gender)}>
+            <option value="male">男性</option>
+            <option value="female">女性</option>
+          </select>
 
-            <div>
-              <label style={{ display: "block", fontSize: 12, color: "#334155" }}>年齡</label>
-              <select
-                value={age}
-                onChange={(e) => setAge(e.target.value as PersonaAge)}
-                style={{ width: "100%", padding: 10, borderRadius: 10, border: "1px solid #cbd5e1" }}
-                disabled={rtcStatus === "connected" || rtcStatus === "starting"}
-              >
-                <option value="28">28</option>
-                <option value="38">38</option>
-                <option value="45">45</option>
-                <option value="55">55</option>
-              </select>
-            </div>
+          <input type="number" value={age} onChange={(e) => setAge(+e.target.value)} />
 
-            <div>
-              <label style={{ display: "block", fontSize: 12, color: "#334155" }}>職業</label>
-              <select
-                value={job}
-                onChange={(e) => setJob(e.target.value as PersonaJob)}
-                style={{ width: "100%", padding: 10, borderRadius: 10, border: "1px solid #cbd5e1" }}
-                disabled={rtcStatus === "connected" || rtcStatus === "starting"}
-              >
-                <option value="factory">工廠/製造業</option>
-                <option value="office">一般上班族</option>
-                <option value="self_employed">自營/小店老闆</option>
-                <option value="teacher">教育相關</option>
-                <option value="healthcare">醫療相關</option>
-              </select>
-            </div>
+          <input value={job} onChange={(e) => setJob(e.target.value)} />
 
-            <div>
-              <label style={{ display: "block", fontSize: 12, color: "#334155" }}>對保險態度</label>
-              <select
-                value={attitude}
-                onChange={(e) => setAttitude(e.target.value as PersonaAttitude)}
-                style={{ width: "100%", padding: 10, borderRadius: 10, border: "1px solid #cbd5e1" }}
-                disabled={rtcStatus === "connected" || rtcStatus === "starting"}
-              >
-                <option value="neutral">中立</option>
-                <option value="skeptical">懷疑/怕話術</option>
-                <option value="price_sensitive">價格敏感</option>
-                <option value="already_has">覺得自己已有</option>
-                <option value="avoid_talk">抗拒不想談</option>
-              </select>
-            </div>
+          <select value={attitude} onChange={(e) => setAttitude(e.target.value as Attitude)}>
+            <option value="neutral">中立</option>
+            <option value="skeptical">質疑動機</option>
+            <option value="data_only">只要數據</option>
+            <option value="avoidant">轉移話題</option>
+          </select>
 
-            <div>
-              <label style={{ display: "block", fontSize: 12, color: "#334155" }}>人格姿態（隱藏）</label>
-              <select
-                value={posture}
-                onChange={(e) => setPosture(e.target.value as PersonaPosture)}
-                style={{ width: "100%", padding: 10, borderRadius: 10, border: "1px solid #cbd5e1" }}
-                disabled={rtcStatus === "connected" || rtcStatus === "starting"}
-              >
-                <option value="doubt_motive">質疑業務動機</option>
-                <option value="cant_refuse">不敢拒絕但不答應</option>
-                <option value="data_only">只要數據與邏輯</option>
-                <option value="change_topic">轉移話題/敷衍</option>
-              </select>
-            </div>
-
-            <div>
-              <label style={{ display: "block", fontSize: 12, color: "#334155" }}>模擬對話主題</label>
-              <select
-                value={topic}
-                onChange={(e) => setTopic(e.target.value as SimTopic)}
-                style={{ width: "100%", padding: 10, borderRadius: 10, border: "1px solid #cbd5e1" }}
-                disabled={rtcStatus === "connected" || rtcStatus === "starting"}
-              >
-                <option value="appointment">1. 電話約訪</option>
-                <option value="product">2. 行銷保險商品</option>
-                <option value="relationship">3. 客情培養</option>
-              </select>
-            </div>
-          </div>
-
-          <div style={{ marginTop: 10, fontSize: 12, color: "#475569", lineHeight: 1.6 }}>
-            ✅ 目前：{personaText.genderText}/{age}歲/{personaText.jobText}/{personaText.attitudeText}（{personaText.postureRule}）
-          </div>
+          <select value={topic} onChange={(e) => setTopic(e.target.value as Topic)}>
+            <option value="phone_invite">電話約訪</option>
+            <option value="product_marketing">行銷保險商品</option>
+            <option value="relationship">客情培養</option>
+          </select>
         </div>
+      </section>
 
-        {/* 控制 */}
-        <div style={{ marginTop: 16, display: "flex", gap: 10, flexWrap: "wrap" }}>
-          <button
-            onClick={enableMic}
-            disabled={micStatus === "requesting" || micStatus === "ready"}
-            style={{
-              padding: "10px 14px",
-              borderRadius: 999,
-              border: "none",
-              background: "#16a34a",
-              color: "white",
-              fontWeight: 800,
-              cursor: "pointer",
-              opacity: micStatus === "requesting" || micStatus === "ready" ? 0.6 : 1,
-            }}
-          >
-            啟用麥克風
-          </button>
+      {/* Controls */}
+      <section style={{ marginTop: 24 }}>
+        {!micReady && <button onClick={enableMic}>啟用麥克風</button>}
+        {micReady && !connected && <button onClick={startRealtime}>開始即時對話</button>}
+        {connected && (
+          <>
+            <button onMouseDown={startTalk} onMouseUp={stopTalk}>
+              🎙️ 按住說話
+            </button>
+            <button onClick={endRealtime}>結束</button>
+          </>
+        )}
+      </section>
 
-          <button
-            onClick={startRealtime}
-            disabled={micStatus !== "ready" || rtcStatus === "starting" || rtcStatus === "connected"}
-            style={{
-              padding: "10px 14px",
-              borderRadius: 999,
-              border: "none",
-              background: "#2563eb",
-              color: "white",
-              fontWeight: 800,
-              cursor: "pointer",
-              opacity:
-                micStatus !== "ready" || rtcStatus === "starting" || rtcStatus === "connected"
-                  ? 0.6
-                  : 1,
-            }}
-          >
-            開始即時對話
-          </button>
-
-          <button
-            onClick={endRealtime}
-            disabled={rtcStatus !== "connected" && rtcStatus !== "starting"}
-            style={{
-              padding: "10px 14px",
-              borderRadius: 999,
-              border: "1px solid #cbd5e1",
-              background: "white",
-              fontWeight: 800,
-              cursor: "pointer",
-              opacity: rtcStatus !== "connected" && rtcStatus !== "starting" ? 0.6 : 1,
-            }}
-          >
-            結束
-          </button>
-
-          <div style={{ alignSelf: "center", fontSize: 13, color: "#334155" }}>
-            <strong>剩餘：</strong> {mm}:{ss}　<strong>狀態：</strong> {rtcStatus} {hasRemoteAudio ? "✅" : ""}
-          </div>
-        </div>
-
-        {/* Push-to-talk */}
-        <div style={{ marginTop: 16 }}>
-          <button
-            onPointerDown={(e) => {
-              e.preventDefault();
-              pttDown();
-            }}
-            onPointerUp={(e) => {
-              e.preventDefault();
-              pttUp();
-            }}
-            onPointerCancel={(e) => {
-              e.preventDefault();
-              pttUp();
-            }}
-            onPointerLeave={(e) => {
-              if (isHolding) {
-                e.preventDefault();
-                pttUp();
-              }
-            }}
-            disabled={rtcStatus !== "connected"}
-            style={{
-              width: "100%",
-              padding: "16px 14px",
-              borderRadius: 18,
-              border: "none",
-              background: rtcStatus === "connected" ? (isHolding ? "#0f172a" : "#111827") : "#94a3b8",
-              color: "white",
-              fontWeight: 900,
-              fontSize: 16,
-              cursor: rtcStatus === "connected" ? "pointer" : "not-allowed",
-              userSelect: "none",
-              WebkitUserSelect: "none",
-              touchAction: "none",
-            }}
-          >
-            {rtcStatus !== "connected" ? "請先開始即時對話" : isHolding ? "放開 → 傳送給 AI" : "按住說話（Push-to-Talk）"}
-          </button>
-        </div>
-
-        {/* 提示 */}
-        <div
-          style={{
-            marginTop: 18,
-            padding: 18,
-            borderRadius: 16,
-            background: "#eff6ff",
-            border: "1px solid #bfdbfe",
-          }}
-        >
-          <strong>目前提示</strong>
-          <p style={{ margin: "8px 0 0", fontSize: 18 }}>{prompts[currentPrompt]}</p>
-          <button
-            type="button"
-            onClick={() => nextPrompt()}
-            style={{
-              marginTop: 12,
-              padding: "10px 14px",
-              borderRadius: 999,
-              border: "none",
-              background: "#2563eb",
-              color: "white",
-              fontWeight: 800,
-              cursor: "pointer",
-            }}
-          >
-            下一句提示
-          </button>
-        </div>
-
-        {/* 回饋 */}
-        <div style={{ marginTop: 18 }}>
-          <label htmlFor="note" style={{ display: "block", marginBottom: 8, fontWeight: 800 }}>
-            今日自我回饋
-          </label>
-          <textarea
-            id="note"
-            value={note}
-            onChange={(e) => setNote(e.target.value)}
-            placeholder="例：語速要再慢、先問需求、不要急著約"
-            rows={5}
-            style={{
-              width: "100%",
-              padding: 12,
-              borderRadius: 12,
-              border: "1px solid #cbd5e1",
-              fontFamily: "inherit",
-            }}
-          />
-        </div>
-
-        {/* 日誌 */}
-        <div style={{ marginTop: 18 }}>
-          <div style={{ fontWeight: 900, marginBottom: 8 }}>連線日誌（Debug）</div>
-          <div
-            style={{
-              border: "1px solid #0b1220",
-              borderRadius: 14,
-              padding: 12,
-              background: "#0b1220",
-              color: "#e2e8f0",
-              fontSize: 12,
-              lineHeight: 1.5,
-              maxHeight: 340,
-              overflow: "auto",
-              whiteSpace: "pre-wrap",
-            }}
-          >
-            {logLines.length ? logLines.join("\n") : "尚無日誌。"}
-          </div>
-        </div>
+      {/* Logs */}
+      <section style={{ marginTop: 24 }}>
+        <h3>系統日誌</h3>
+        <pre style={{ background: "#111", color: "#0f0", padding: 12, height: 240, overflow: "auto" }}>
+          {logLines.join("\n")}
+        </pre>
       </section>
     </main>
   );
