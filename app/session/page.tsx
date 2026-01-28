@@ -26,7 +26,6 @@ export default function SessionPage() {
   const [timeRemaining, setTimeRemaining] = useState(300);
   const [isTimerActive, setIsTimerActive] = useState(false);
   
-  // 新增：倒數狀態（用於開始前的3秒倒數）
   const [countdown, setCountdown] = useState<number | null>(null);
   
   const [conversationHistory, setConversationHistory] = useState<ConversationTurn[]>([]);
@@ -40,7 +39,6 @@ export default function SessionPage() {
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const personaReadyRef = useRef(false);
   
-  // 用來暫存當前對話輪次的內容
   const currentUserSpeechRef = useRef<string>("");
   const currentAISpeechRef = useRef<string>("");
 
@@ -48,7 +46,6 @@ export default function SessionPage() {
     setLogLines((p) => [`[${new Date().toLocaleTimeString()}] ${msg}`, ...p].slice(0, 120));
   }
 
-  // 倒數計時器
   useEffect(() => {
     if (!isTimerActive || timeRemaining <= 0) return;
 
@@ -66,7 +63,6 @@ export default function SessionPage() {
     return () => clearInterval(timer);
   }, [isTimerActive, timeRemaining]);
 
-  // 開始前的3秒倒數
   useEffect(() => {
     if (countdown === null || countdown <= 0) return;
 
@@ -84,16 +80,13 @@ export default function SessionPage() {
   }
 
   async function enableMicAndStart() {
-    // 先啟用麥克風
     const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
     streamRef.current = stream;
     log("Mic ready ✅");
     
-    // 開始3秒倒數
     setCountdown(3);
     log("開始倒數 3...");
     
-    // 3秒後自動開始
     setTimeout(() => {
       setCountdown(null);
       startRealtime();
@@ -181,7 +174,6 @@ ${topic === "relationship" ? "業務員打電話進行客情維護，關心你�
             modalities: ["audio", "text"],
             voice: "alloy",
             instructions: buildPersona(),
-            // 關鍵修正：正確設定語音轉文字
             input_audio_transcription: {
               model: "whisper-1"
             },
@@ -197,7 +189,6 @@ ${topic === "relationship" ? "業務員打電話進行客情維護，關心你�
     dc.onmessage = (e) => {
       const data = JSON.parse(e.data);
       
-      // 列出所有收到的事件類型，方便除錯
       if (data.type) {
         log(`📨 Event: ${data.type}`);
       }
@@ -207,7 +198,6 @@ ${topic === "relationship" ? "業務員打電話進行客情維護，關心你�
         setIsTimerActive(true);
       }
       
-      // 方法1：捕捉語音轉文字（使用者的話）
       if (data.type === "conversation.item.input_audio_transcription.completed") {
         const userText = data.transcript;
         currentUserSpeechRef.current = userText;
@@ -220,10 +210,7 @@ ${topic === "relationship" ? "業務員打電話進行客情維護，關心你�
         }]);
       }
       
-      // 方法2：捕捉AI的文字回應
-      // 注意：這裡有多種可能的事件類型
       if (data.type === "response.audio_transcript.delta") {
-        // 累積文字片段
         currentAISpeechRef.current += data.delta || "";
       }
       
@@ -238,21 +225,17 @@ ${topic === "relationship" ? "業務員打電話進行客情維護，關心你�
             timestamp: new Date()
           }]);
           
-          // 即時分析
           if (currentUserSpeechRef.current) {
             performLiveAnalysis(currentUserSpeechRef.current, aiText);
           }
           
-          // 重置暫存
           currentAISpeechRef.current = "";
         }
       }
       
-      // 備用方法：如果上面的方法都沒捕捉到，試試這個
       if (data.type === "response.done") {
         log("AI responded ✅");
         
-        // 檢查是否有output
         if (data.response?.output && data.response.output.length > 0) {
           const output = data.response.output[0];
           if (output.content && output.content.length > 0) {
@@ -262,7 +245,6 @@ ${topic === "relationship" ? "業務員打電話進行客情維護，關心你�
               log(`🤖 客戶(backup): ${aiText}`);
               
               setConversationHistory(prev => {
-                // 避免重複
                 if (prev[prev.length - 1]?.content === aiText) {
                   return prev;
                 }
@@ -308,11 +290,9 @@ ${topic === "relationship" ? "業務員打電話進行客情維護，關心你�
     log("Realtime connected ✅");
   }
 
-  // 即時分析（只顯示關鍵警示）
   function performLiveAnalysis(userSpeech: string, aiResponse: string) {
     const alerts: string[] = [];
     
-    // 只檢測最關鍵的問題
     if (userSpeech.includes("你應該") || userSpeech.includes("一定要") || 
         userSpeech.includes("必須")) {
       alerts.push("⚠️ 強迫感：這句話可能讓客戶感到壓力");
@@ -334,11 +314,10 @@ ${topic === "relationship" ? "業務員打電話進行客情維護，關心你�
     }
     
     if (alerts.length > 0) {
-      setLiveFeedback(prev => [...alerts, ...prev].slice(0, 5)); // 只保留最近5條
+      setLiveFeedback(prev => [...alerts, ...prev].slice(0, 5));
     }
   }
 
-  // 生成完整報告
   function generateFinalReport() {
     const report: string[] = [];
     
@@ -350,22 +329,27 @@ ${topic === "relationship" ? "業務員打電話進行客情維護，關心你�
     report.push(`📊 對話分析報告 - ${conversationHistory.length} 個回合`);
     report.push("");
     
-    // 統計分析
     const userTurns = conversationHistory.filter(t => t.role === "user");
     const aiTurns = conversationHistory.filter(t => t.role === "assistant");
     
-    // 分析使用者的話術特徵
+    if (userTurns.length === 0) {
+      report.push("⚠️ 未捕捉到您的發言內容，可能是語音轉文字功能異常");
+      return report;
+    }
+    
     let commandingCount = 0;
     let apologizingCount = 0;
     let dataFocusCount = 0;
     let empathyCount = 0;
+    let questionCount = 0;
     
     userTurns.forEach(turn => {
       if (turn.content.includes("應該") || turn.content.includes("一定") || 
           turn.content.includes("必須")) {
         commandingCount++;
       }
-      if ((turn.content.match(/對不起|抱歉|不好意思/g) || []).length >= 2) {
+      const apologies = (turn.content.match(/對不起|抱歉|不好意思/g) || []).length;
+      if (apologies >= 2) {
         apologizingCount++;
       }
       if (turn.content.includes("數據") || turn.content.includes("統計") || 
@@ -376,12 +360,16 @@ ${topic === "relationship" ? "業務員打電話進行客情維護，關心你�
           turn.content.includes("感受")) {
         empathyCount++;
       }
+      if (turn.content.includes("嗎") || turn.content.includes("嗎？") ||
+          turn.content.includes("呢") || turn.content.includes("?")) {
+        questionCount++;
+      }
     });
     
-    // 分析客戶反應
     let resistanceCount = 0;
     let avoidanceCount = 0;
     let suspicionCount = 0;
+    let positiveCount = 0;
     
     aiTurns.forEach(turn => {
       if (turn.content.includes("不需要") || turn.content.includes("沒興趣")) {
@@ -393,64 +381,161 @@ ${topic === "relationship" ? "業務員打電話進行客情維護，關心你�
       if (turn.content.includes("推銷") || turn.content.includes("佣金")) {
         suspicionCount++;
       }
+      if (turn.content.includes("可以") || turn.content.includes("好") || 
+          turn.content.includes("沒問題")) {
+        positiveCount++;
+      }
     });
     
-    // 生成報告內容
     report.push("【你的溝通風格】");
+    report.push("");
+    
+    let hasIssues = false;
     
     if (commandingCount > userTurns.length * 0.3) {
       report.push("⚠️ 指責姿態較明顯：經常使用命令式或要求性的語言，容易讓客戶感到壓迫");
+      report.push(`   數據：${userTurns.length} 句中有 ${commandingCount} 句使用強迫性語言`);
       report.push("   建議：試著用「您可以考慮」代替「您應該」");
+      report.push("");
+      hasIssues = true;
     }
     
     if (apologizingCount > userTurns.length * 0.4) {
       report.push("💡 討好姿態較明顯：過度道歉可能削弱專業形象");
+      report.push(`   數據：${userTurns.length} 句中有 ${apologizingCount} 句過度道歉`);
       report.push("   建議：適度的禮貌即可，保持自信的語氣");
+      report.push("");
+      hasIssues = true;
     }
     
     if (dataFocusCount > userTurns.length * 0.5 && empathyCount === 0) {
       report.push("💭 超理智姿態：過度強調數據和邏輯，缺少情感連結");
+      report.push(`   數據：${dataFocusCount} 次提到數據/證據，但沒有表達同理心`);
       report.push("   建議：在數據之外，也要表達對客戶處境的理解");
+      report.push("");
+      hasIssues = true;
     }
     
-    if (empathyCount > userTurns.length * 0.3) {
-      report.push("✅ 展現同理心：能夠理解客戶的感受，這有助於建立信任");
+    if (empathyCount > 0) {
+      report.push(`✅ 展現同理心：${empathyCount} 次表達理解客戶的感受，這有助於建立信任`);
+      report.push("");
     }
     
-    report.push("");
+    if (questionCount > userTurns.length * 0.3) {
+      report.push(`✅ 善用提問：${questionCount} 次使用問句，能引導對話並了解客戶需求`);
+      report.push("");
+    }
+    
+    if (!hasIssues && empathyCount === 0 && questionCount <= userTurns.length * 0.2) {
+      report.push("💬 溝通風格平穩：沒有明顯的問題模式");
+      report.push("   建議：可以增加更多提問來了解客戶需求，並適時表達同理心");
+      report.push("");
+    }
+    
+    if (!hasIssues && (empathyCount > 0 || questionCount > userTurns.length * 0.3)) {
+      report.push("⭐ 溝通風格良好：保持了專業且友善的對話方式");
+      report.push("");
+    }
+    
     report.push("【客戶的反應】");
+    report.push("");
     
     if (suspicionCount > 0) {
       report.push(`🚨 客戶戒心：${suspicionCount} 次提到推銷相關詞彙`);
       report.push("   原因：可能是開場太商業化，或過早進入推銷階段");
+      report.push("");
     }
     
     if (resistanceCount > 0) {
       report.push(`🛑 明確拒絕：${resistanceCount} 次表達不需要或沒興趣`);
       report.push("   建議：先了解拒絕背後的真正原因，而非繼續推銷");
+      report.push("");
     }
     
     if (avoidanceCount > 0) {
       report.push(`⏰ 迴避訊號：${avoidanceCount} 次試圖結束對話`);
       report.push("   建議：可能需要更早建立價值感，讓客戶願意投入時間");
+      report.push("");
     }
     
-    if (resistanceCount === 0 && suspicionCount === 0) {
+    if (positiveCount > aiTurns.length * 0.5) {
+      report.push(`✅ 客戶回應積極：${positiveCount} 次表達同意或願意配合`);
+      report.push("   這顯示你成功建立了良好的對話氛圍");
+      report.push("");
+    }
+    
+    if (resistanceCount === 0 && suspicionCount === 0 && avoidanceCount === 0) {
       report.push("✅ 客戶態度良好：沒有明顯的抗拒或懷疑反應");
+      report.push("");
+    }
+    
+    report.push("【改進建議】");
+    report.push("");
+    
+    if (attitude === "skeptical") {
+      if (suspicionCount === 0) {
+        report.push("⭐ 本次模擬的客戶設定為「質疑態度」，但客戶沒有表現出明顯懷疑");
+        report.push("   這表示你的話術成功降低了客戶的戒心！");
+        report.push("   建議：繼續保持這種非推銷式的溝通方式");
+      } else {
+        report.push("⚠️ 客戶設定為「質疑態度」且確實表現出懷疑");
+        report.push("   建議：面對質疑型客戶，要先建立信任感再談產品");
+        report.push("   可以多分享客戶見證或專業知識，而非直接推銷");
+      }
+    } else if (attitude === "avoidant") {
+      if (avoidanceCount < aiTurns.length * 0.3) {
+        report.push("⭐ 本次模擬的客戶設定為「迴避態度」，但迴避訊號不明顯");
+        report.push("   這表示你成功引起了客戶的興趣！");
+      } else {
+        report.push("⚠️ 客戶設定為「迴避態度」且確實想結束對話");
+        report.push("   建議：面對想迴避的客戶，要在30秒內說出價值主張");
+        report.push("   例如：「只佔用您2分鐘，讓您了解一個可能幫您省錢的方式」");
+      }
+    } else if (attitude === "neutral") {
+      if (positiveCount > aiTurns.length * 0.5) {
+        report.push("✅ 客戶設定為「中立態度」，你成功讓客戶偏向正面回應");
+        report.push("   建議：繼續深化對話，可以提出具體的行動方案（如約訪）");
+      }
+    } else if (attitude === "data_only") {
+      if (dataFocusCount > 0) {
+        report.push("✅ 面對「數據導向」的客戶，你有使用數據來支持論述");
+      } else {
+        report.push("💡 客戶設定為「數據導向」，但你較少使用數據說明");
+        report.push("   建議：這類客戶重視具體數字，要準備費率、保額、理賠數據等");
+      }
     }
     
     report.push("");
-    report.push("【改進建議】");
     
-    // 根據設定的態度給予針對性建議
-    if (attitude === "skeptical" && suspicionCount === 0) {
-      report.push("⭐ 本次模擬的客戶設定為「質疑態度」，但客戶沒有表現出明顯懷疑");
-      report.push("   可能原因：你的話術成功降低了客戶的戒心，或者客戶角色扮演不夠到位");
+    if (questionCount < userTurns.length * 0.2) {
+      report.push("💡 提問較少：試著多問開放式問題來了解客戶需求");
+      report.push("   例如：「您目前最擔心的風險是什麼？」");
     }
     
-    if (attitude === "avoidant" && avoidanceCount < aiTurns.length * 0.3) {
-      report.push("⭐ 本次模擬的客戶設定為「迴避態度」，但迴避訊號不明顯");
-      report.push("   這表示你可能成功引起了客戶的興趣");
+    if (empathyCount === 0 && userTurns.length > 5) {
+      report.push("💡 可以增加同理心表達：讓客戶感受到你理解他們的處境");
+      report.push("   例如：「我理解您的顧慮」、「這確實是很多人關心的問題」");
+    }
+    
+    report.push("");
+    report.push("【總結】");
+    report.push("");
+    
+    const totalIssues = (commandingCount > userTurns.length * 0.3 ? 1 : 0) +
+                        (apologizingCount > userTurns.length * 0.4 ? 1 : 0) +
+                        (suspicionCount > 0 ? 1 : 0) +
+                        (resistanceCount > 0 ? 1 : 0);
+    
+    if (totalIssues === 0) {
+      report.push("🎉 本次練習表現良好！繼續保持專業且友善的溝通方式");
+      report.push(`   對話回合數：${conversationHistory.length / 2} 個`);
+      report.push(`   客戶正面回應：${positiveCount} 次`);
+    } else if (totalIssues <= 2) {
+      report.push("👍 本次練習有進步空間，請注意上述提到的幾個重點");
+      report.push(`   對話回合數：${conversationHistory.length / 2} 個`);
+    } else {
+      report.push("💪 本次練習發現較多改進機會，建議針對這些問題多加練習");
+      report.push(`   對話回合數：${conversationHistory.length / 2} 個`);
     }
     
     return report;
@@ -476,7 +561,6 @@ ${topic === "relationship" ? "業務員打電話進行客情維護，關心你�
   }
 
   function endRealtime() {
-    // 生成完整報告
     const report = generateFinalReport();
     setFinalReport(report);
     setShowReport(true);
@@ -518,7 +602,6 @@ ${topic === "relationship" ? "業務員打電話進行客情維護，關心你�
         gap: 30,
         marginBottom: 30
       }}>
-        {/* 左側：客戶人設設定 */}
         <div style={{
           background: "white",
           borderRadius: 12,
@@ -677,7 +760,6 @@ ${topic === "relationship" ? "業務員打電話進行客情維護，關心你�
           </div>
         </div>
 
-        {/* 右側：控制面板 */}
         <div style={{
           background: "white",
           borderRadius: 12,
@@ -693,7 +775,6 @@ ${topic === "relationship" ? "業務員打電話進行客情維護，關心你�
             🎮 控制面板
           </h2>
 
-          {/* 倒數畫面 */}
           {countdown !== null && countdown > 0 && (
             <div style={{
               background: "#e3f2fd",
@@ -715,7 +796,6 @@ ${topic === "relationship" ? "業務員打電話進行客情維護，關心你�
             </div>
           )}
 
-          {/* 時間顯示 */}
           {connected && (
             <div style={{
               background: timeRemaining < 60 ? "#fff3cd" : "#e3f2fd",
@@ -798,7 +878,6 @@ ${topic === "relationship" ? "業務員打電話進行客情維護，關心你�
             )}
           </div>
 
-          {/* 即時警示回饋 */}
           {liveFeedback.length > 0 && connected && (
             <div style={{
               background: "#fff9e6",
@@ -835,7 +914,6 @@ ${topic === "relationship" ? "業務員打電話進行客情維護，關心你�
         </div>
       </div>
 
-      {/* 完整報告 */}
       {showReport && finalReport.length > 0 && (
         <div style={{
           background: "white",
@@ -865,7 +943,6 @@ ${topic === "relationship" ? "業務員打電話進行客情維護，關心你�
         </div>
       )}
 
-      {/* 系統日誌 */}
       <div style={{
         background: "#1a1a1a",
         borderRadius: 12,
