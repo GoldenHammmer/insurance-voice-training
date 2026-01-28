@@ -7,7 +7,6 @@ type Gender = "male" | "female";
 type Attitude = "neutral" | "skeptical" | "data_only" | "avoidant";
 type Topic = "phone_invite" | "product_marketing" | "relationship";
 
-// 新增：用來儲存對話歷史的資料結構
 type ConversationTurn = {
   role: "user" | "assistant";
   content: string;
@@ -21,17 +20,19 @@ export default function SessionPage() {
   const [attitude, setAttitude] = useState<Attitude>("neutral");
   const [topic, setTopic] = useState<Topic>("phone_invite");
 
-  const [micReady, setMicReady] = useState(false);
   const [connected, setConnected] = useState(false);
   const [logLines, setLogLines] = useState<string[]>([]);
   
-  // 新增：時間倒數相關狀態
-  const [timeRemaining, setTimeRemaining] = useState(300); // 5分鐘 = 300秒
+  const [timeRemaining, setTimeRemaining] = useState(300);
   const [isTimerActive, setIsTimerActive] = useState(false);
   
-  // 新增：對話歷史和心理分析
+  // 新增：倒數狀態（用於開始前的3秒倒數）
+  const [countdown, setCountdown] = useState<number | null>(null);
+  
   const [conversationHistory, setConversationHistory] = useState<ConversationTurn[]>([]);
-  const [psychologicalFeedback, setPsychologicalFeedback] = useState<string[]>([]);
+  const [liveFeedback, setLiveFeedback] = useState<string[]>([]);
+  const [finalReport, setFinalReport] = useState<string[]>([]);
+  const [showReport, setShowReport] = useState(false);
 
   const streamRef = useRef<MediaStream | null>(null);
   const pcRef = useRef<RTCPeerConnection | null>(null);
@@ -39,21 +40,21 @@ export default function SessionPage() {
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const personaReadyRef = useRef(false);
   
-  // 新增：用來追蹤當前使用者的發言內容（語音轉文字）
+  // 用來暫存當前對話輪次的內容
   const currentUserSpeechRef = useRef<string>("");
+  const currentAISpeechRef = useRef<string>("");
 
   function log(msg: string) {
     setLogLines((p) => [`[${new Date().toLocaleTimeString()}] ${msg}`, ...p].slice(0, 120));
   }
 
-  // 新增：倒數計時器
+  // 倒數計時器
   useEffect(() => {
     if (!isTimerActive || timeRemaining <= 0) return;
 
     const timer = setInterval(() => {
       setTimeRemaining((prev) => {
         if (prev <= 1) {
-          // 時間到，自動結束session
           log("⏰ 練習時間結束，自動終止");
           endRealtime();
           return 0;
@@ -65,22 +66,41 @@ export default function SessionPage() {
     return () => clearInterval(timer);
   }, [isTimerActive, timeRemaining]);
 
-  // 格式化時間顯示
+  // 開始前的3秒倒數
+  useEffect(() => {
+    if (countdown === null || countdown <= 0) return;
+
+    const timer = setTimeout(() => {
+      setCountdown(countdown - 1);
+    }, 1000);
+
+    return () => clearTimeout(timer);
+  }, [countdown]);
+
   function formatTime(seconds: number): string {
     const mins = Math.floor(seconds / 60);
     const secs = seconds % 60;
     return `${mins}:${secs.toString().padStart(2, '0')}`;
   }
 
-  async function enableMic() {
+  async function enableMicAndStart() {
+    // 先啟用麥克風
     const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
     streamRef.current = stream;
-    setMicReady(true);
     log("Mic ready ✅");
+    
+    // 開始3秒倒數
+    setCountdown(3);
+    log("開始倒數 3...");
+    
+    // 3秒後自動開始
+    setTimeout(() => {
+      setCountdown(null);
+      startRealtime();
+    }, 3000);
   }
 
   function buildPersona() {
-    // 這是改良版的persona，加入了更多細節和明確的行為指示
     return `
 你是【台灣的保險客戶】，不是業務員，也不是AI助理。
 
@@ -119,11 +139,13 @@ ${topic === "relationship" ? "業務員打電話進行客情維護，關心你�
 
     log("Starting realtime…");
 
-    // 重置狀態
     setTimeRemaining(300);
     setConversationHistory([]);
-    setPsychologicalFeedback([]);
+    setLiveFeedback([]);
+    setFinalReport([]);
+    setShowReport(false);
     currentUserSpeechRef.current = "";
+    currentAISpeechRef.current = "";
 
     const tokenRes = await fetch("/api/session/demo/ephemeral", { method: "POST" });
     const tokenJson = await tokenRes.json();
@@ -159,10 +181,10 @@ ${topic === "relationship" ? "業務員打電話進行客情維護，關心你�
             modalities: ["audio", "text"],
             voice: "alloy",
             instructions: buildPersona(),
-            // 關鍵：開啟transcript功能，這樣我們才能取得對話的文字內容
+            // 關鍵修正：正確設定語音轉文字
             input_audio_transcription: {
               model: "whisper-1"
-            }
+            },
           },
         })
       );
@@ -175,19 +197,22 @@ ${topic === "relationship" ? "業務員打電話進行客情維護，關心你�
     dc.onmessage = (e) => {
       const data = JSON.parse(e.data);
       
+      // 列出所有收到的事件類型，方便除錯
+      if (data.type) {
+        log(`📨 Event: ${data.type}`);
+      }
+      
       if (data.type === "session.updated") {
         log("Session updated confirmed ✅");
-        // 連線成功後啟動計時器
         setIsTimerActive(true);
       }
       
-      // 捕捉使用者的語音轉文字內容
+      // 方法1：捕捉語音轉文字（使用者的話）
       if (data.type === "conversation.item.input_audio_transcription.completed") {
         const userText = data.transcript;
         currentUserSpeechRef.current = userText;
         log(`📝 您說: ${userText}`);
         
-        // 記錄到對話歷史
         setConversationHistory(prev => [...prev, {
           role: "user",
           content: userText,
@@ -195,24 +220,65 @@ ${topic === "relationship" ? "業務員打電話進行客情維護，關心你�
         }]);
       }
       
-      // 捕捉AI的文字回應
-      if (data.type === "response.text.done") {
-        const aiText = data.text;
-        log(`🤖 客戶回應: ${aiText}`);
-        
-        // 記錄到對話歷史
-        setConversationHistory(prev => [...prev, {
-          role: "assistant",
-          content: aiText,
-          timestamp: new Date()
-        }]);
-        
-        // 進行心理分析（這裡我們會呼叫分析函數）
-        analyzeInteraction(currentUserSpeechRef.current, aiText);
+      // 方法2：捕捉AI的文字回應
+      // 注意：這裡有多種可能的事件類型
+      if (data.type === "response.audio_transcript.delta") {
+        // 累積文字片段
+        currentAISpeechRef.current += data.delta || "";
       }
       
+      if (data.type === "response.audio_transcript.done") {
+        const aiText = data.transcript || currentAISpeechRef.current;
+        if (aiText) {
+          log(`🤖 客戶: ${aiText}`);
+          
+          setConversationHistory(prev => [...prev, {
+            role: "assistant",
+            content: aiText,
+            timestamp: new Date()
+          }]);
+          
+          // 即時分析
+          if (currentUserSpeechRef.current) {
+            performLiveAnalysis(currentUserSpeechRef.current, aiText);
+          }
+          
+          // 重置暫存
+          currentAISpeechRef.current = "";
+        }
+      }
+      
+      // 備用方法：如果上面的方法都沒捕捉到，試試這個
       if (data.type === "response.done") {
         log("AI responded ✅");
+        
+        // 檢查是否有output
+        if (data.response?.output && data.response.output.length > 0) {
+          const output = data.response.output[0];
+          if (output.content && output.content.length > 0) {
+            const textContent = output.content.find((c: any) => c.type === "text");
+            if (textContent && textContent.text) {
+              const aiText = textContent.text;
+              log(`🤖 客戶(backup): ${aiText}`);
+              
+              setConversationHistory(prev => {
+                // 避免重複
+                if (prev[prev.length - 1]?.content === aiText) {
+                  return prev;
+                }
+                return [...prev, {
+                  role: "assistant",
+                  content: aiText,
+                  timestamp: new Date()
+                }];
+              });
+              
+              if (currentUserSpeechRef.current) {
+                performLiveAnalysis(currentUserSpeechRef.current, aiText);
+              }
+            }
+          }
+        }
       }
       
       if (data.type === "error") {
@@ -242,64 +308,152 @@ ${topic === "relationship" ? "業務員打電話進行客情維護，關心你�
     log("Realtime connected ✅");
   }
 
-  // 新增：心理分析函數
-  // 這個函數會分析業務員的話術，並給予基於薩提爾模式的回饋
-  function analyzeInteraction(userSpeech: string, aiResponse: string) {
-    const feedback: string[] = [];
+  // 即時分析（只顯示關鍵警示）
+  function performLiveAnalysis(userSpeech: string, aiResponse: string) {
+    const alerts: string[] = [];
     
-    // 分析指責姿態（Blaming）的跡象
-    // 當業務員使用「你應該」「你一定要」等強迫性語言時
+    // 只檢測最關鍵的問題
     if (userSpeech.includes("你應該") || userSpeech.includes("一定要") || 
-        userSpeech.includes("必須") || userSpeech.includes("怎麼可以")) {
-      feedback.push("⚠️ 這句話帶有強烈的命令感，可能讓客戶感到被指責或壓迫");
+        userSpeech.includes("必須")) {
+      alerts.push("⚠️ 強迫感：這句話可能讓客戶感到壓力");
     }
     
-    // 分析討好姿態（Placating）的跡象
-    // 當業務員過度道歉或貶低自己時
-    if ((userSpeech.match(/對不起|抱歉|不好意思/g) || []).length > 2) {
-      feedback.push("💡 過度道歉可能讓你顯得不夠專業，適度的禮貌即可");
+    if (aiResponse.includes("推銷") || aiResponse.includes("佣金") || 
+        aiResponse.includes("業務")) {
+      alerts.push("🚨 戒心提起：客戶對推銷行為有防備");
     }
     
-    // 分析超理智姿態（Super-reasonable）的跡象
-    // 當業務員只談數據和邏輯，忽略情感連結時
-    if (userSpeech.includes("根據數據") || userSpeech.includes("統計顯示") || 
-        userSpeech.includes("事實證明")) {
-      // 這個要看客戶的態度，如果客戶是data_only就是對的
-      if (attitude !== "data_only") {
-        feedback.push("💭 純粹的數據陳述可能顯得冷漠，可以加入一些同理心的表達");
-      }
+    if (aiResponse.includes("不需要") || aiResponse.includes("沒興趣") || 
+        aiResponse.includes("不用了")) {
+      alerts.push("🛑 明確拒絕：需要轉換策略");
     }
     
-    // 分析打岔姿態（Irrelevant）的跡象
-    // 當業務員說的話跟客戶的回應沒有關聯時
     if (aiResponse.includes("很忙") || aiResponse.includes("沒時間") || 
         aiResponse.includes("改天")) {
-      if (userSpeech.includes("商品") || userSpeech.includes("保險")) {
-        feedback.push("⚡ 客戶想迴避話題，你可能需要先建立信任感，而不是直接推銷");
+      alerts.push("⏰ 迴避訊號：客戶想結束對話");
+    }
+    
+    if (alerts.length > 0) {
+      setLiveFeedback(prev => [...alerts, ...prev].slice(0, 5)); // 只保留最近5條
+    }
+  }
+
+  // 生成完整報告
+  function generateFinalReport() {
+    const report: string[] = [];
+    
+    if (conversationHistory.length === 0) {
+      report.push("📊 本次練習沒有記錄到對話內容");
+      return report;
+    }
+    
+    report.push(`📊 對話分析報告 - ${conversationHistory.length} 個回合`);
+    report.push("");
+    
+    // 統計分析
+    const userTurns = conversationHistory.filter(t => t.role === "user");
+    const aiTurns = conversationHistory.filter(t => t.role === "assistant");
+    
+    // 分析使用者的話術特徵
+    let commandingCount = 0;
+    let apologizingCount = 0;
+    let dataFocusCount = 0;
+    let empathyCount = 0;
+    
+    userTurns.forEach(turn => {
+      if (turn.content.includes("應該") || turn.content.includes("一定") || 
+          turn.content.includes("必須")) {
+        commandingCount++;
       }
+      if ((turn.content.match(/對不起|抱歉|不好意思/g) || []).length >= 2) {
+        apologizingCount++;
+      }
+      if (turn.content.includes("數據") || turn.content.includes("統計") || 
+          turn.content.includes("證明")) {
+        dataFocusCount++;
+      }
+      if (turn.content.includes("理解") || turn.content.includes("明白") || 
+          turn.content.includes("感受")) {
+        empathyCount++;
+      }
+    });
+    
+    // 分析客戶反應
+    let resistanceCount = 0;
+    let avoidanceCount = 0;
+    let suspicionCount = 0;
+    
+    aiTurns.forEach(turn => {
+      if (turn.content.includes("不需要") || turn.content.includes("沒興趣")) {
+        resistanceCount++;
+      }
+      if (turn.content.includes("很忙") || turn.content.includes("改天")) {
+        avoidanceCount++;
+      }
+      if (turn.content.includes("推銷") || turn.content.includes("佣金")) {
+        suspicionCount++;
+      }
+    });
+    
+    // 生成報告內容
+    report.push("【你的溝通風格】");
+    
+    if (commandingCount > userTurns.length * 0.3) {
+      report.push("⚠️ 指責姿態較明顯：經常使用命令式或要求性的語言，容易讓客戶感到壓迫");
+      report.push("   建議：試著用「您可以考慮」代替「您應該」");
     }
     
-    // 分析一致性溝通（Congruent）的正面跡象
-    if (userSpeech.includes("我理解") || userSpeech.includes("我明白")) {
-      feedback.push("✅ 展現同理心是很好的開始，有助於建立信任");
+    if (apologizingCount > userTurns.length * 0.4) {
+      report.push("💡 討好姿態較明顯：過度道歉可能削弱專業形象");
+      report.push("   建議：適度的禮貌即可，保持自信的語氣");
     }
     
-    // 分析客戶的戒心反應
-    if (aiResponse.includes("推銷") || aiResponse.includes("業務") || 
-        aiResponse.includes("賺錢") || aiResponse.includes("佣金")) {
-      feedback.push("🚨 客戶的戒心被提起了，你的用詞可能太過商業化或急於成交");
+    if (dataFocusCount > userTurns.length * 0.5 && empathyCount === 0) {
+      report.push("💭 超理智姿態：過度強調數據和邏輯，缺少情感連結");
+      report.push("   建議：在數據之外，也要表達對客戶處境的理解");
     }
     
-    // 分析客戶的抗拒反應
-    if (aiResponse.includes("不需要") || aiResponse.includes("不用了") || 
-        aiResponse.includes("沒興趣")) {
-      feedback.push("🛑 客戶表達明確的拒絕，可以嘗試轉換話題或詢問真正的顧慮");
+    if (empathyCount > userTurns.length * 0.3) {
+      report.push("✅ 展現同理心：能夠理解客戶的感受，這有助於建立信任");
     }
     
-    // 只有當有回饋時才更新狀態
-    if (feedback.length > 0) {
-      setPsychologicalFeedback(prev => [...feedback, ...prev].slice(0, 10)); // 只保留最近10條
+    report.push("");
+    report.push("【客戶的反應】");
+    
+    if (suspicionCount > 0) {
+      report.push(`🚨 客戶戒心：${suspicionCount} 次提到推銷相關詞彙`);
+      report.push("   原因：可能是開場太商業化，或過早進入推銷階段");
     }
+    
+    if (resistanceCount > 0) {
+      report.push(`🛑 明確拒絕：${resistanceCount} 次表達不需要或沒興趣`);
+      report.push("   建議：先了解拒絕背後的真正原因，而非繼續推銷");
+    }
+    
+    if (avoidanceCount > 0) {
+      report.push(`⏰ 迴避訊號：${avoidanceCount} 次試圖結束對話`);
+      report.push("   建議：可能需要更早建立價值感，讓客戶願意投入時間");
+    }
+    
+    if (resistanceCount === 0 && suspicionCount === 0) {
+      report.push("✅ 客戶態度良好：沒有明顯的抗拒或懷疑反應");
+    }
+    
+    report.push("");
+    report.push("【改進建議】");
+    
+    // 根據設定的態度給予針對性建議
+    if (attitude === "skeptical" && suspicionCount === 0) {
+      report.push("⭐ 本次模擬的客戶設定為「質疑態度」，但客戶沒有表現出明顯懷疑");
+      report.push("   可能原因：你的話術成功降低了客戶的戒心，或者客戶角色扮演不夠到位");
+    }
+    
+    if (attitude === "avoidant" && avoidanceCount < aiTurns.length * 0.3) {
+      report.push("⭐ 本次模擬的客戶設定為「迴避態度」，但迴避訊號不明顯");
+      report.push("   這表示你可能成功引起了客戶的興趣");
+    }
+    
+    return report;
   }
 
   function startTalk() {
@@ -311,7 +465,6 @@ ${topic === "relationship" ? "業務員打電話進行客情維護，關心你�
 
     log("📡 傳送給 AI");
 
-    // 使用版本A：完全依賴session層級的persona設定
     dcRef.current.send(
       JSON.stringify({
         type: "response.create",
@@ -323,6 +476,11 @@ ${topic === "relationship" ? "業務員打電話進行客情維護，關心你�
   }
 
   function endRealtime() {
+    // 生成完整報告
+    const report = generateFinalReport();
+    setFinalReport(report);
+    setShowReport(true);
+    
     dcRef.current?.close();
     pcRef.current?.close();
     setConnected(false);
@@ -354,7 +512,6 @@ ${topic === "relationship" ? "業務員打電話進行客情維護，關心你�
         🎯 保險業務模擬訓練
       </h1>
 
-      {/* 優化後的UI介面 */}
       <div style={{
         display: "grid",
         gridTemplateColumns: "1fr 1fr",
@@ -390,15 +547,15 @@ ${topic === "relationship" ? "業務員打電話進行客情維護，關心你�
             <select 
               value={gender} 
               onChange={(e) => setGender(e.target.value as Gender)}
-              disabled={connected}
+              disabled={connected || countdown !== null}
               style={{
                 width: "100%",
                 padding: "10px 12px",
                 fontSize: 16,
                 border: "1px solid #dfe6e9",
                 borderRadius: 8,
-                background: connected ? "#f5f5f5" : "white",
-                cursor: connected ? "not-allowed" : "pointer"
+                background: (connected || countdown !== null) ? "#f5f5f5" : "white",
+                cursor: (connected || countdown !== null) ? "not-allowed" : "pointer"
               }}
             >
               <option value="male">👨 男性</option>
@@ -420,14 +577,14 @@ ${topic === "relationship" ? "業務員打電話進行客情維護，關心你�
               type="number" 
               value={age} 
               onChange={(e) => setAge(+e.target.value)}
-              disabled={connected}
+              disabled={connected || countdown !== null}
               style={{
                 width: "100%",
                 padding: "10px 12px",
                 fontSize: 16,
                 border: "1px solid #dfe6e9",
                 borderRadius: 8,
-                background: connected ? "#f5f5f5" : "white"
+                background: (connected || countdown !== null) ? "#f5f5f5" : "white"
               }}
             />
           </div>
@@ -445,7 +602,7 @@ ${topic === "relationship" ? "業務員打電話進行客情維護，關心你�
             <input 
               value={job} 
               onChange={(e) => setJob(e.target.value)}
-              disabled={connected}
+              disabled={connected || countdown !== null}
               placeholder="例如：工廠技術人員"
               style={{
                 width: "100%",
@@ -453,7 +610,7 @@ ${topic === "relationship" ? "業務員打電話進行客情維護，關心你�
                 fontSize: 16,
                 border: "1px solid #dfe6e9",
                 borderRadius: 8,
-                background: connected ? "#f5f5f5" : "white"
+                background: (connected || countdown !== null) ? "#f5f5f5" : "white"
               }}
             />
           </div>
@@ -471,15 +628,15 @@ ${topic === "relationship" ? "業務員打電話進行客情維護，關心你�
             <select 
               value={attitude} 
               onChange={(e) => setAttitude(e.target.value as Attitude)}
-              disabled={connected}
+              disabled={connected || countdown !== null}
               style={{
                 width: "100%",
                 padding: "10px 12px",
                 fontSize: 16,
                 border: "1px solid #dfe6e9",
                 borderRadius: 8,
-                background: connected ? "#f5f5f5" : "white",
-                cursor: connected ? "not-allowed" : "pointer"
+                background: (connected || countdown !== null) ? "#f5f5f5" : "white",
+                cursor: (connected || countdown !== null) ? "not-allowed" : "pointer"
               }}
             >
               <option value="neutral">😐 中立（願意聽但觀望）</option>
@@ -502,15 +659,15 @@ ${topic === "relationship" ? "業務員打電話進行客情維護，關心你�
             <select 
               value={topic} 
               onChange={(e) => setTopic(e.target.value as Topic)}
-              disabled={connected}
+              disabled={connected || countdown !== null}
               style={{
                 width: "100%",
                 padding: "10px 12px",
                 fontSize: 16,
                 border: "1px solid #dfe6e9",
                 borderRadius: 8,
-                background: connected ? "#f5f5f5" : "white",
-                cursor: connected ? "not-allowed" : "pointer"
+                background: (connected || countdown !== null) ? "#f5f5f5" : "white",
+                cursor: (connected || countdown !== null) ? "not-allowed" : "pointer"
               }}
             >
               <option value="phone_invite">📞 電話約訪</option>
@@ -536,6 +693,28 @@ ${topic === "relationship" ? "業務員打電話進行客情維護，關心你�
             🎮 控制面板
           </h2>
 
+          {/* 倒數畫面 */}
+          {countdown !== null && countdown > 0 && (
+            <div style={{
+              background: "#e3f2fd",
+              padding: 40,
+              borderRadius: 12,
+              marginBottom: 20,
+              textAlign: "center"
+            }}>
+              <div style={{ fontSize: 18, color: "#636e72", marginBottom: 12 }}>
+                準備開始...
+              </div>
+              <div style={{ 
+                fontSize: 72, 
+                fontWeight: 700,
+                color: "#0984e3"
+              }}>
+                {countdown}
+              </div>
+            </div>
+          )}
+
           {/* 時間顯示 */}
           {connected && (
             <div style={{
@@ -559,28 +738,9 @@ ${topic === "relationship" ? "業務員打電話進行客情維護，關心你�
           )}
 
           <div style={{ marginBottom: 20 }}>
-            {!micReady && (
+            {!connected && countdown === null && (
               <button 
-                onClick={enableMic}
-                style={{
-                  width: "100%",
-                  padding: "14px 20px",
-                  fontSize: 16,
-                  fontWeight: 600,
-                  color: "white",
-                  background: "#0984e3",
-                  border: "none",
-                  borderRadius: 8,
-                  cursor: "pointer"
-                }}
-              >
-                🎤 啟用麥克風
-              </button>
-            )}
-            
-            {micReady && !connected && (
-              <button 
-                onClick={startRealtime}
+                onClick={enableMicAndStart}
                 style={{
                   width: "100%",
                   padding: "14px 20px",
@@ -638,8 +798,8 @@ ${topic === "relationship" ? "業務員打電話進行客情維護，關心你�
             )}
           </div>
 
-          {/* 心理教練回饋 */}
-          {psychologicalFeedback.length > 0 && (
+          {/* 即時警示回饋 */}
+          {liveFeedback.length > 0 && connected && (
             <div style={{
               background: "#fff9e6",
               border: "1px solid #ffe0b2",
@@ -653,9 +813,9 @@ ${topic === "relationship" ? "業務員打電話進行客情維護，關心你�
                 marginBottom: 12,
                 color: "#e67e22"
               }}>
-                💡 教練回饋
+                ⚡ 即時警示
               </h3>
-              {psychologicalFeedback.map((feedback, idx) => (
+              {liveFeedback.map((feedback, idx) => (
                 <div 
                   key={idx}
                   style={{
@@ -674,6 +834,36 @@ ${topic === "relationship" ? "業務員打電話進行客情維護，關心你�
           )}
         </div>
       </div>
+
+      {/* 完整報告 */}
+      {showReport && finalReport.length > 0 && (
+        <div style={{
+          background: "white",
+          borderRadius: 12,
+          padding: 24,
+          marginBottom: 30,
+          boxShadow: "0 2px 8px rgba(0,0,0,0.1)"
+        }}>
+          <h2 style={{
+            fontSize: 24,
+            marginTop: 0,
+            marginBottom: 20,
+            color: "#2d3436"
+          }}>
+            📊 完整分析報告
+          </h2>
+          <div style={{
+            background: "#f8f9fa",
+            padding: 20,
+            borderRadius: 8,
+            fontFamily: "monospace",
+            whiteSpace: "pre-wrap",
+            lineHeight: 1.8
+          }}>
+            {finalReport.join("\n")}
+          </div>
+        </div>
+      )}
 
       {/* 系統日誌 */}
       <div style={{
