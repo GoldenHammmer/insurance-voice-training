@@ -4,8 +4,8 @@ import { useRef, useState, useEffect } from "react";
 import Link from "next/link";
 
 type Gender = "male" | "female";
-type Attitude = "neutral" | "skeptical" | "data_only" | "avoidant";
-type Topic = "phone_invite" | "product_marketing" | "relationship";
+type Attitude = "neutral" | "avoidant" | "skeptical" | "has_insurance";
+type Topic = "phone_invite" | "product_marketing" | "objection_handling";
 
 type ConversationTurn = {
   role: "user" | "assistant";
@@ -19,7 +19,12 @@ export default function SessionPage() {
   const [job, setJob] = useState("工廠技術人員");
   const [attitude, setAttitude] = useState<Attitude>("neutral");
   const [topic, setTopic] = useState<Topic>("phone_invite");
+  const [objectionDetail, setObjectionDetail] = useState("");
   const [voice, setVoice] = useState<string>("alloy");
+  
+  const [showAdvanced, setShowAdvanced] = useState(false);
+  const [customScenario, setCustomScenario] = useState("");
+  const [trainingGoal, setTrainingGoal] = useState("");
 
   const [connected, setConnected] = useState(false);
   const [logLines, setLogLines] = useState<string[]>([]);
@@ -98,23 +103,14 @@ export default function SessionPage() {
   function buildPersona() {
     let interruptionStyle = "";
     
-    if (attitude === "skeptical") {
+    if (attitude === "skeptical" || attitude === "avoidant") {
       interruptionStyle = `
-- 當業務員說話超過 3 句時，你會直接打斷，用質疑的語氣反駁
-- 使用「等等」「不對吧」「可是」這類打斷的詞語
-`;
-    } else if (attitude === "avoidant") {
-      interruptionStyle = `
-- 當業務員開始長篇大論時，你會不耐煩地打斷
-- 使用「好了好了」「我真的很忙」「不用說了」來中斷對話
-`;
-    } else if (attitude === "data_only") {
-      interruptionStyle = `
-- 當業務員說太多感性的話而不給數據時，你會打斷要求看數字
+- 當業務員說話超過 3 句時，你會直接打斷，用質疑或不耐煩的語氣反駁
+- 使用「等等」「不對吧」「可是」「好了好了」這類打斷的詞語
 `;
     }
 
-    return `
+    let basePersona = `
 你是【台灣的保險客戶】，不是業務員，也不是AI助理。
 
 基本資料：
@@ -124,20 +120,32 @@ export default function SessionPage() {
 - 地區：台灣
 - 語言：繁體中文（使用台灣口語習慣）
 
-對保險的態度：
-${attitude === "neutral" ? "中立態度 - 願意聽業務員說明，通常會等對方說完才回應" : ""}
-${attitude === "skeptical" ? "質疑態度 - 對保險業務抱持懷疑，會急著反駁，經常打斷對方" : ""}
-${attitude === "data_only" ? "數據導向 - 對冗長的說明會不耐煩，會直接打斷並要求看數據" : ""}
-${attitude === "avoidant" ? "迴避態度 - 不想浪費時間聽業務員說話，會頻繁打斷想結束對話" : ""}
+態度姿態：
+${attitude === "neutral" ? "中立態度（基礎）- 願意聽業務員說明，通常會等對方說完才回應，保持禮貌但觀望" : ""}
+${attitude === "avoidant" ? "迴避態度（中難）- 不想浪費時間聽業務員說話，會頻繁打斷想結束對話，使用「我很忙」「沒興趣」「改天再說」" : ""}
+${attitude === "skeptical" ? "質疑態度（高難）- 對保險業務抱持懷疑，會急著反駁，經常打斷對方，質疑動機和真實性" : ""}
+${attitude === "has_insurance" ? "已有保險（實戰）- 認為自己的保障已經足夠，會說「我已經買了」「我朋友是XX公司的業務員」，不覺得需要再加保" : ""}
 
 打斷行為規則：
 ${interruptionStyle}
 
-當前情境：
-${topic === "phone_invite" ? "你接到業務員打來的電話約訪，想約你見面詳談" : ""}
+當前場景：
+${topic === "phone_invite" ? "你接到業務員打來的電話約訪，對方想約你見面詳談" : ""}
 ${topic === "product_marketing" ? "業務員正在電話中向你介紹保險商品，想推銷給你" : ""}
-${topic === "relationship" ? "業務員打電話進行客情維護，關心你的近況" : ""}
+${topic === "objection_handling" ? `業務員正在處理你的異議${objectionDetail ? `：${objectionDetail}` : ""}` : ""}
+`;
 
+    // 如果使用者有自訂場景，加入進去
+    if (customScenario && customScenario.trim()) {
+      basePersona += `\n\n特殊情境補充：\n${customScenario}\n`;
+    }
+
+    // 如果使用者有設定訓練目標，告訴 AI 要配合
+    if (trainingGoal && trainingGoal.trim()) {
+      basePersona += `\n\n業務員的訓練目標：\n${trainingGoal}\n請根據這個目標調整你的回應，幫助他練習。\n`;
+    }
+
+    basePersona += `
 重要行為規則：
 - 永遠使用繁體中文，保持台灣人的口語風格
 - 每次回應只說 1～2 句話
@@ -148,6 +156,8 @@ ${topic === "relationship" ? "業務員打電話進行客情維護，關心你�
 - 不要說「我是AI」或任何暴露AI身份的話
 - 保持真實客戶會有的反應，包括猶豫、思考、拒絕等
 `;
+
+    return basePersona;
   }
 
   async function startRealtime() {
@@ -190,12 +200,9 @@ ${topic === "relationship" ? "業務員打電話進行客情維護，關心你�
     dc.onopen = () => {
       log("DataChannel open ✅");
 
-      // 根據態度調整 VAD 參數，模擬不同的打斷傾向
-      let silenceDuration = 700; // 預設：中立態度
+      let silenceDuration = 700;
       if (attitude === "skeptical" || attitude === "avoidant") {
-        silenceDuration = 400; // 更容易搶話
-      } else if (attitude === "data_only") {
-        silenceDuration = 500; // 稍微容易搶話
+        silenceDuration = 400;
       }
 
       dc.send(
@@ -203,7 +210,7 @@ ${topic === "relationship" ? "業務員打電話進行客情維護，關心你�
           type: "session.update",
           session: {
             modalities: ["audio", "text"],
-            voice: voice, // 使用者選擇的聲音
+            voice: voice,
             instructions: buildPersona(),
             input_audio_transcription: {
               model: "whisper-1"
@@ -641,7 +648,7 @@ ${topic === "relationship" ? "業務員打電話進行客情維護，關心你�
               marginBottom: 8,
               color: "#636e72"
             }}>
-              對保險的態度
+              態度姿態
             </label>
             <select 
               value={attitude} 
@@ -657,10 +664,10 @@ ${topic === "relationship" ? "業務員打電話進行客情維護，關心你�
                 cursor: (connected || countdown !== null) ? "not-allowed" : "pointer"
               }}
             >
-              <option value="neutral">😐 中立（願意聽但觀望）</option>
-              <option value="skeptical">🤨 質疑（懷疑動機、有戒心）</option>
-              <option value="data_only">📊 數據導向（只看數字不聽故事）</option>
-              <option value="avoidant">🚶 迴避（想快點結束對話）</option>
+              <option value="neutral">😐 中立態度（基礎）</option>
+              <option value="avoidant">🚶 迴避態度（中難）</option>
+              <option value="skeptical">🤨 質疑態度（高難）</option>
+              <option value="has_insurance">📋 已有保險（實戰）</option>
             </select>
           </div>
 
@@ -688,7 +695,7 @@ ${topic === "relationship" ? "業務員打電話進行客情維護，關心你�
                 cursor: (connected || countdown !== null) ? "not-allowed" : "pointer"
               }}
             >
-              <option value="alloy">Alloy（中性）</option>
+              <option value="alloy">Alloy（中性、平衡）</option>
               <option value="echo">Echo（男性、溫暖）</option>
               <option value="shimmer">Shimmer（女性、溫柔）</option>
               <option value="ash">Ash（男性、沉穩）</option>
@@ -699,7 +706,7 @@ ${topic === "relationship" ? "業務員打電話進行客情維護，關心你�
             </select>
           </div>
 
-          <div style={{ marginBottom: 0 }}>
+          <div style={{ marginBottom: 20 }}>
             <label style={{
               display: "block",
               fontSize: 14,
@@ -707,7 +714,7 @@ ${topic === "relationship" ? "業務員打電話進行客情維護，關心你�
               marginBottom: 8,
               color: "#636e72"
             }}>
-              演練方向
+              場景
             </label>
             <select 
               value={topic} 
@@ -725,8 +732,125 @@ ${topic === "relationship" ? "業務員打電話進行客情維護，關心你�
             >
               <option value="phone_invite">📞 電話約訪</option>
               <option value="product_marketing">💼 商品推銷</option>
-              <option value="relationship">☕ 客情維護</option>
+              <option value="objection_handling">🔄 處理異議</option>
             </select>
+          </div>
+
+          {topic === "objection_handling" && (
+            <div style={{ marginBottom: 20 }}>
+              <label style={{
+                display: "block",
+                fontSize: 14,
+                fontWeight: 600,
+                marginBottom: 8,
+                color: "#636e72"
+              }}>
+                處理什麼異議？
+              </label>
+              <input 
+                value={objectionDetail} 
+                onChange={(e) => setObjectionDetail(e.target.value)}
+                disabled={connected || countdown !== null}
+                placeholder="例如：價格太貴、要再考慮、已經買了..."
+                style={{
+                  width: "100%",
+                  padding: "10px 12px",
+                  fontSize: 16,
+                  border: "1px solid #dfe6e9",
+                  borderRadius: 8,
+                  background: (connected || countdown !== null) ? "#f5f5f5" : "white"
+                }}
+              />
+            </div>
+          )}
+
+          {/* 進階設定 */}
+          <div style={{ marginTop: 20 }}>
+            <button 
+              onClick={() => setShowAdvanced(!showAdvanced)}
+              disabled={connected || countdown !== null}
+              style={{
+                width: "100%",
+                padding: "10px",
+                background: "#f8f9fa",
+                border: "1px dashed #dfe6e9",
+                borderRadius: 8,
+                cursor: (connected || countdown !== null) ? "not-allowed" : "pointer",
+                color: "#636e72",
+                fontSize: 14,
+                fontWeight: 600
+              }}
+            >
+              {showAdvanced ? "▼ 收起進階設定" : "▶ 進階設定（自訂場景）"}
+            </button>
+            
+            {showAdvanced && (
+              <div style={{ marginTop: 15, padding: 15, background: "#f8f9fa", borderRadius: 8 }}>
+                <label style={{ 
+                  display: "block", 
+                  fontSize: 14, 
+                  fontWeight: 600, 
+                  marginBottom: 8,
+                  color: "#636e72"
+                }}>
+                  📝 自訂場景說明（選填）
+                </label>
+                <textarea
+                  value={customScenario}
+                  onChange={(e) => setCustomScenario(e.target.value)}
+                  disabled={connected || countdown !== null}
+                  placeholder="例如：&#10;• 客戶剛生小孩，想推薦兒童保險&#10;• 客戶說保費太貴&#10;• 練習向老朋友推薦保險&#10;• 客戶的老公在國泰買了保險"
+                  style={{
+                    width: "100%",
+                    minHeight: 80,
+                    padding: 10,
+                    fontSize: 14,
+                    border: "1px solid #dfe6e9",
+                    borderRadius: 8,
+                    resize: "vertical",
+                    fontFamily: "inherit",
+                    background: (connected || countdown !== null) ? "#f5f5f5" : "white"
+                  }}
+                />
+                
+                <label style={{ 
+                  display: "block", 
+                  fontSize: 14, 
+                  fontWeight: 600, 
+                  marginTop: 15, 
+                  marginBottom: 8,
+                  color: "#636e72"
+                }}>
+                  🎯 我的目標（選填）
+                </label>
+                <textarea
+                  value={trainingGoal}
+                  onChange={(e) => setTrainingGoal(e.target.value)}
+                  disabled={connected || countdown !== null}
+                  placeholder="例如：&#10;• 練習前 30 秒的開場破冰&#10;• 學會挖掘客戶真正的需求&#10;• 練習處理「我要考慮」的推託&#10;• 學會不直接攻擊競品"
+                  style={{
+                    width: "100%",
+                    minHeight: 60,
+                    padding: 10,
+                    fontSize: 14,
+                    border: "1px solid #dfe6e9",
+                    borderRadius: 8,
+                    resize: "vertical",
+                    fontFamily: "inherit",
+                    background: (connected || countdown !== null) ? "#f5f5f5" : "white"
+                  }}
+                />
+                
+                <div style={{ 
+                  marginTop: 10, 
+                  fontSize: 12, 
+                  color: "#636e72", 
+                  lineHeight: 1.5 
+                }}>
+                  💡 提示：這些設定會讓 AI 客戶更貼近你想練習的情境
+                </div>
+              </div>
+            )}
           </div>
         </div>
 
@@ -919,7 +1043,9 @@ ${topic === "relationship" ? "業務員打電話進行客情維護，關心你�
             borderRadius: 8,
             fontFamily: "monospace",
             whiteSpace: "pre-wrap",
-            lineHeight: 1.8
+            lineHeight: 1.8,
+            maxHeight: 600,
+            overflow: "auto"
           }}>
             {finalReport.join("\n")}
           </div>
