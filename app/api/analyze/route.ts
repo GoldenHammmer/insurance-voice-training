@@ -48,7 +48,7 @@ ${transcript}
 請條列式呈現，避免學術術語，要讓業務員能直接理解應用。`;
 
     const message = await anthropic.messages.create({
-      model: "claude-3-5-sonnet-20241022",
+      model: "claude-3-5-sonnet-20250514",  // 使用正確的模型名稱
       max_tokens: 2000,
       messages: [{
         role: "user",
