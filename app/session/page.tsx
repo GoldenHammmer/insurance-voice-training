@@ -689,10 +689,13 @@ ${topic === "relationship" ? "業務員打電話進行客情維護，關心你�
               }}
             >
               <option value="alloy">Alloy（中性）</option>
-              <option value="echo">Echo（男性溫暖）</option>
-              <option value="onyx">Onyx（男性低沉）</option>
-              <option value="nova">Nova（女性活潑）</option>
-              <option value="shimmer">Shimmer（女性溫柔）</option>
+              <option value="echo">Echo（男性、溫暖）</option>
+              <option value="shimmer">Shimmer（女性、溫柔）</option>
+              <option value="ash">Ash（男性、沉穩）</option>
+              <option value="ballad">Ballad（中性、平和）</option>
+              <option value="coral">Coral（女性、明亮）</option>
+              <option value="sage">Sage（女性、成熟）</option>
+              <option value="verse">Verse（男性、年輕）</option>
             </select>
           </div>
 
