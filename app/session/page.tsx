@@ -1,6 +1,7 @@
 "use client";
 
 import { useRef, useState, useEffect } from "react";
+import { useRouter } from "next/navigation";
 import Link from "next/link";
 
 type Gender = "male" | "female";
@@ -14,6 +15,10 @@ type ConversationTurn = {
 };
 
 export default function SessionPage() {
+  const router = useRouter();
+  const [testCode, setTestCode] = useState<string | null>(null);
+  const [testCodeData, setTestCodeData] = useState<any>(null);
+
   const [gender, setGender] = useState<Gender>("male");
   const [age, setAge] = useState(38);
   const [job, setJob] = useState("工廠技術人員");
@@ -39,6 +44,7 @@ export default function SessionPage() {
   const [finalReport, setFinalReport] = useState<string[]>([]);
   const [showReport, setShowReport] = useState(false);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const [hasRecorded, setHasRecorded] = useState(false);
 
   const streamRef = useRef<MediaStream | null>(null);
   const pcRef = useRef<RTCPeerConnection | null>(null);
@@ -48,6 +54,25 @@ export default function SessionPage() {
   
   const currentUserSpeechRef = useRef<string>("");
   const currentAISpeechRef = useRef<string>("");
+
+  useEffect(() => {
+    const code = localStorage.getItem("testCode");
+    const dataStr = localStorage.getItem("testCodeData");
+    
+    if (!code || !dataStr) {
+      router.push("/");
+      return;
+    }
+    
+    try {
+      const data = JSON.parse(dataStr);
+      setTestCode(code);
+      setTestCodeData(data);
+    } catch (e) {
+      console.error("解析測試碼資料失敗:", e);
+      router.push("/");
+    }
+  }, [router]);
 
   function log(msg: string) {
     setLogLines((p) => [`[${new Date().toLocaleTimeString()}] ${msg}`, ...p].slice(0, 120));
@@ -87,6 +112,16 @@ export default function SessionPage() {
   }
 
   async function enableMicAndStart() {
+    if (testCodeData && testCodeData.maxUses !== -1 && testCodeData.remaining <= 0) {
+      alert("您的測試次數已用完，請聯繫管理員");
+      return;
+    }
+
+    if (testCodeData && testCodeData.maxUses !== -1 && testCodeData.remaining === 1) {
+      const confirm = window.confirm("這是您最後 1 次訓練機會，確定要現在開始嗎？");
+      if (!confirm) return;
+    }
+
     const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
     streamRef.current = stream;
     log("Mic ready ✅");
@@ -135,12 +170,10 @@ ${topic === "product_marketing" ? "業務員正在電話中向你介紹保險商
 ${topic === "objection_handling" ? `業務員正在處理你的異議${objectionDetail ? `：${objectionDetail}` : ""}` : ""}
 `;
 
-    // 如果使用者有自訂場景，加入進去
     if (customScenario && customScenario.trim()) {
       basePersona += `\n\n特殊情境補充：\n${customScenario}\n`;
     }
 
-    // 如果使用者有設定訓練目標，告訴 AI 要配合
     if (trainingGoal && trainingGoal.trim()) {
       basePersona += `\n\n業務員的訓練目標：\n${trainingGoal}\n請根據這個目標調整你的回應，幫助他練習。\n`;
     }
@@ -170,6 +203,7 @@ ${topic === "objection_handling" ? `業務員正在處理你的異議${objection
     setLiveFeedback([]);
     setFinalReport([]);
     setShowReport(false);
+    setHasRecorded(false);
     currentUserSpeechRef.current = "";
     currentAISpeechRef.current = "";
 
@@ -474,6 +508,55 @@ ${topic === "objection_handling" ? `業務員正在處理你的異議${objection
     }
   }
 
+  async function recordUsage() {
+    if (!testCode || hasRecorded) return;
+    
+    if (testCodeData && testCodeData.maxUses === -1) {
+      log("管理員碼不記錄使用次數");
+      return;
+    }
+
+    try {
+      const duration = 300 - timeRemaining;
+      
+      if (duration < 60) {
+        log("訓練時間過短（<60秒），不扣除次數");
+        return;
+      }
+
+      const response = await fetch('/api/record-usage', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          testCode: testCode,
+          duration: duration
+        })
+      });
+
+      const data = await response.json();
+
+      if (data.success) {
+        log("✅ 使用記錄已更新");
+        setHasRecorded(true);
+        
+        if (testCodeData) {
+          const updatedData = {
+            ...testCodeData,
+            usedCount: testCodeData.usedCount + 1,
+            remaining: data.remaining
+          };
+          setTestCodeData(updatedData);
+          localStorage.setItem("testCodeData", JSON.stringify(updatedData));
+        }
+      } else {
+        log("⚠️ 記錄使用失敗: " + data.error);
+      }
+    } catch (error) {
+      console.error('記錄錯誤:', error);
+      log("⚠️ 記錄使用時發生錯誤");
+    }
+  }
+
   function stopTalk() {
     if (!dcRef.current || !personaReadyRef.current) return;
 
@@ -506,11 +589,17 @@ ${topic === "objection_handling" ? `業務員正在處理你的異議${objection
       ]);
     });
     
+    recordUsage();
+    
     dcRef.current?.close();
     pcRef.current?.close();
     setConnected(false);
     setIsTimerActive(false);
     log("Session ended ⛔");
+  }
+
+  if (!testCode) {
+    return <div>載入中...</div>;
   }
 
   return (
@@ -543,7 +632,6 @@ ${topic === "objection_handling" ? `業務員正在處理你的異議${objection
         gap: 30,
         marginBottom: 30
       }}>
-        {/* 左側：客戶人設設定 */}
         <div style={{
           background: "white",
           borderRadius: 12,
@@ -764,7 +852,6 @@ ${topic === "objection_handling" ? `業務員正在處理你的異議${objection
             </div>
           )}
 
-          {/* 進階設定 */}
           <div style={{ marginTop: 20 }}>
             <button 
               onClick={() => setShowAdvanced(!showAdvanced)}
@@ -854,7 +941,6 @@ ${topic === "objection_handling" ? `業務員正在處理你的異議${objection
           </div>
         </div>
 
-        {/* 右側：控制面板 */}
         <div style={{
           background: "white",
           borderRadius: 12,
@@ -869,6 +955,27 @@ ${topic === "objection_handling" ? `業務員正在處理你的異議${objection
           }}>
             🎮 控制面板
           </h2>
+
+          {testCodeData && (
+            <div style={{
+              background: "#e3f2fd",
+              padding: 16,
+              borderRadius: 8,
+              marginBottom: 20
+            }}>
+              <div style={{ fontSize: 14, color: "#636e72", marginBottom: 8 }}>
+                測試碼：<strong>{testCode}</strong>
+                {testCodeData.type === "admin" && <span style={{ marginLeft: 8, color: "#e67e22" }}>（管理員）</span>}
+              </div>
+              <div style={{ fontSize: 16, fontWeight: 600, color: "#0984e3" }}>
+                {testCodeData.maxUses === -1 ? (
+                  "無限次使用 ♾️"
+                ) : (
+                  `剩餘訓練次數：${testCodeData.remaining} 次`
+                )}
+              </div>
+            </div>
+          )}
 
           {countdown !== null && countdown > 0 && (
             <div style={{
@@ -1005,7 +1112,6 @@ ${topic === "objection_handling" ? `業務員正在處理你的異議${objection
         </div>
       </div>
 
-      {/* 完整分析報告 */}
       {showReport && finalReport.length > 0 && (
         <div style={{
           background: "white",
@@ -1049,10 +1155,37 @@ ${topic === "objection_handling" ? `業務員正在處理你的異議${objection
           }}>
             {finalReport.join("\n")}
           </div>
+
+          {testCodeData && testCodeData.maxUses !== -1 && !hasRecorded && (
+            <div style={{
+              marginTop: 20,
+              padding: 16,
+              background: "#fff9e6",
+              border: "1px solid #ffe0b2",
+              borderRadius: 8,
+              fontSize: 14,
+              color: "#856404"
+            }}>
+              ℹ️ 本次訓練後剩餘：<strong>{testCodeData.remaining - 1}</strong> 次
+            </div>
+          )}
+
+          {hasRecorded && testCodeData && testCodeData.maxUses !== -1 && (
+            <div style={{
+              marginTop: 20,
+              padding: 16,
+              background: "#d4edda",
+              border: "1px solid #c3e6cb",
+              borderRadius: 8,
+              fontSize: 14,
+              color: "#155724"
+            }}>
+              ✅ 使用記錄已更新，剩餘訓練次數：<strong>{testCodeData.remaining}</strong> 次
+            </div>
+          )}
         </div>
       )}
 
-      {/* 系統日誌 */}
       <div style={{
         background: "#1a1a1a",
         borderRadius: 12,
