@@ -4,6 +4,18 @@ import { useRef, useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 
+// ===== 新增：匯入客情系統模組 =====
+import { 
+  analyzeUtterance, 
+  calculateNewRapportScore,
+  getRapportStatus,
+  getInitialRapportScore,
+  generateRapportSummary,
+  type RapportEvent 
+} from "@/lib/rapport/engine";
+import RapportIndicator from "@/components/RapportIndicator";
+// ===================================
+
 type Gender = "male" | "female";
 type Attitude = "neutral" | "avoidant" | "skeptical" | "has_insurance";
 type Topic = "phone_invite" | "product_marketing" | "objection_handling";
@@ -46,6 +58,14 @@ export default function SessionPage() {
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [hasRecorded, setHasRecorded] = useState(false);
 
+  // ===== 新增：客情系統狀態管理 =====
+  const [rapportScore, setRapportScore] = useState(50);
+  const [rapportEvents, setRapportEvents] = useState<RapportEvent[]>([]);
+  const [currentStrategy, setCurrentStrategy] = useState<string | undefined>();
+  const [currentResponseGuide, setCurrentResponseGuide] = useState<string | undefined>();
+  const [detectedPosture, setDetectedPosture] = useState<string | undefined>();
+  // ===================================
+
   const streamRef = useRef<MediaStream | null>(null);
   const pcRef = useRef<RTCPeerConnection | null>(null);
   const dcRef = useRef<RTCDataChannel | null>(null);
@@ -73,6 +93,16 @@ export default function SessionPage() {
       router.push("/");
     }
   }, [router]);
+
+  // ===== 新增：當客戶態度改變時，重設初始客情分數 =====
+  useEffect(() => {
+    if (!connected) {
+      const initialScore = getInitialRapportScore(attitude);
+      setRapportScore(initialScore);
+      log(`客情初始分數設定為 ${initialScore} (${attitude} 態度)`);
+    }
+  }, [attitude, connected]);
+  // ===================================
 
   function log(msg: string) {
     setLogLines((p) => [`[${new Date().toLocaleTimeString()}] ${msg}`, ...p].slice(0, 120));
@@ -207,6 +237,16 @@ ${topic === "objection_handling" ? `業務員正在處理你的異議${objection
     currentUserSpeechRef.current = "";
     currentAISpeechRef.current = "";
 
+    // ===== 新增：重設客情系統狀態 =====
+    const initialScore = getInitialRapportScore(attitude);
+    setRapportScore(initialScore);
+    setRapportEvents([]);
+    setCurrentStrategy(undefined);
+    setCurrentResponseGuide(undefined);
+    setDetectedPosture(undefined);
+    log(`🤝 客情系統已啟動，初始分數：${initialScore}`);
+    // ===================================
+
     const tokenRes = await fetch("/api/session/demo/ephemeral", { method: "POST" });
     const tokenJson = await tokenRes.json();
     const secret = tokenJson?.client_secret?.value;
@@ -303,6 +343,10 @@ ${topic === "objection_handling" ? `業務員正在處理你的異議${objection
             timestamp: new Date()
           }]);
           
+          // ===== 新增：分析客戶回應並更新客情 =====
+          analyzeAndUpdateRapport(aiText, "assistant");
+          // ===================================
+          
           if (currentUserSpeechRef.current) {
             performLiveAnalysis(currentUserSpeechRef.current, aiText);
           }
@@ -332,6 +376,10 @@ ${topic === "objection_handling" ? `業務員正在處理你的異議${objection
                   timestamp: new Date()
                 }];
               });
+              
+              // ===== 新增：備用路徑的客情分析 =====
+              analyzeAndUpdateRapport(aiText, "assistant");
+              // ===================================
               
               if (currentUserSpeechRef.current) {
                 performLiveAnalysis(currentUserSpeechRef.current, aiText);
@@ -367,6 +415,54 @@ ${topic === "objection_handling" ? `業務員正在處理你的異議${objection
     setConnected(true);
     log("Realtime connected ✅");
   }
+
+  // ===== 新增：客情分析核心函數 =====
+  function analyzeAndUpdateRapport(utterance: string, speaker: "user" | "assistant") {
+    // 將當前場景的 topic 映射到引擎所需的 Scenario 類型
+    const scenarioMap = {
+      "phone_invite": "phone_invite" as const,
+      "product_marketing": "product_marketing" as const,
+      "objection_handling": "objection_handling" as const
+    };
+    
+    const scenario = scenarioMap[topic];
+    
+    // 呼叫規則引擎分析這段話語
+    const analysis = analyzeUtterance(utterance, scenario, attitude, speaker);
+    
+    // 如果偵測到語意模式，更新客情狀態
+    if (analysis.matchedRules.length > 0) {
+      const currentScore = rapportScore;
+      const newScore = calculateNewRapportScore(currentScore, analysis.rapportChange);
+      
+      // 更新客情分數
+      setRapportScore(newScore);
+      
+      // 更新當前策略和話術建議
+      setCurrentStrategy(analysis.suggestedStrategy);
+      setCurrentResponseGuide(analysis.responseGuide);
+      setDetectedPosture(analysis.detectedPosture);
+      
+      // 記錄客情事件
+      const event: RapportEvent = {
+        timestamp: new Date(),
+        speaker,
+        utterance,
+        matchedRule: analysis.matchedRules[0],
+        scoreBefore: currentScore,
+        scoreAfter: newScore,
+        change: analysis.rapportChange
+      };
+      
+      setRapportEvents(prev => [...prev, event]);
+      
+      // 在日誌中記錄客情變化
+      const changeSymbol = analysis.rapportChange > 0 ? "📈" : "📉";
+      log(`${changeSymbol} 客情變化: ${currentScore} → ${newScore} (${analysis.rapportChange > 0 ? '+' : ''}${analysis.rapportChange})`);
+      log(`   模式: ${analysis.matchedRules[0].intentClassification}`);
+    }
+  }
+  // ===================================
 
   function performLiveAnalysis(userSpeech: string, aiResponse: string) {
     const alerts: string[] = [];
@@ -479,6 +575,11 @@ ${topic === "objection_handling" ? `業務員正在處理你的異議${objection
         `${turn.role === 'user' ? '業務員' : '客戶'}: ${turn.content}`
       ).join('\n');
       
+      // ===== 修改：加入客情資料 =====
+      const initialScore = getInitialRapportScore(attitude);
+      const rapportSummary = generateRapportSummary(rapportEvents, rapportScore, initialScore);
+      // ===================================
+      
       const response = await fetch('/api/analyze', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -488,7 +589,15 @@ ${topic === "objection_handling" ? `業務員正在處理你的異議${objection
           topic,
           gender,
           age,
-          job
+          job,
+          // ===== 新增：傳遞客情資料 =====
+          rapportData: {
+            initialScore,
+            finalScore: rapportScore,
+            events: rapportEvents,
+            summary: rapportSummary
+          }
+          // ===================================
         })
       });
       
@@ -601,6 +710,10 @@ ${topic === "objection_handling" ? `業務員正在處理你的異議${objection
   if (!testCode) {
     return <div>載入中...</div>;
   }
+
+  // ===== 新增：取得當前客情狀態（用於傳遞給視覺化組件）=====
+  const rapportStatus = getRapportStatus(rapportScore);
+  // ===================================
 
   return (
     <main style={{ 
@@ -976,6 +1089,19 @@ ${topic === "objection_handling" ? `業務員正在處理你的異議${objection
               </div>
             </div>
           )}
+
+          {/* ===== 新增：客情指示器組件 ===== */}
+          <div style={{ marginBottom: 20 }}>
+            <RapportIndicator 
+              status={rapportStatus}
+              detectedPosture={detectedPosture}
+              suggestedStrategy={currentStrategy}
+              responseGuide={currentResponseGuide}
+              showDetailedAdvice={connected}
+              isTrainingActive={connected}
+            />
+          </div>
+          {/* ===================================== */}
 
           {countdown !== null && countdown > 0 && (
             <div style={{
