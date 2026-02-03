@@ -1,75 +1,199 @@
 import Anthropic from "@anthropic-ai/sdk";
+import { NextRequest, NextResponse } from "next/server";
 
-export async function POST(req: Request) {
+const anthropic = new Anthropic({
+  apiKey: process.env.ANTHROPIC_API_KEY,
+});
+
+export async function POST(req: NextRequest) {
   try {
-    const { transcript, attitude, topic, gender, age, job } = await req.json();
-    
-    const anthropic = new Anthropic({
-      apiKey: process.env.ANTHROPIC_API_KEY,
-    });
+    const body = await req.json();
+    const { 
+      transcript, 
+      attitude, 
+      topic, 
+      gender, 
+      age, 
+      job,
+      rapportData  // 新增：接收客情資料
+    } = body;
 
-    const analysisPrompt = `你是一位專業的保險業務訓練教練，精通薩提爾溝通模式和 NLP 技巧。
+    if (!transcript) {
+      return NextResponse.json(
+        { success: false, error: "缺少對話記錄" },
+        { status: 400 }
+      );
+    }
 
-請分析以下這段保險業務員與客戶的對話練習：
+    // 建立分析提示詞
+    const analysisPrompt = buildAnalysisPrompt(
+      transcript,
+      attitude,
+      topic,
+      gender,
+      age,
+      job,
+      rapportData
+    );
 
-客戶設定：
-- 性別：${gender === "male" ? "男性" : "女性"}
-- 年齡：${age} 歲
-- 職業：${job}
-- 態度：${attitude === "skeptical" ? "質疑" : attitude === "avoidant" ? "迴避" : attitude === "data_only" ? "數據導向" : "中立"}
-- 情境：${topic === "phone_invite" ? "電話約訪" : topic === "product_marketing" ? "商品推銷" : "客情維護"}
-
-對話內容：
-${transcript}
-
-請提供以下分析（請用繁體中文，並使用台灣的用語習慣）：
-
-1. 薩提爾溝通姿態分析
-   - 指責姿態：是否使用命令、要求的語言
-   - 討好姿態：是否過度道歉
-   - 超理智姿態：是否只談數據缺少情感
-   - 一致性溝通：是否真誠直接
-
-2. NLP 技巧運用
-   - 呼應技巧：是否重複客戶用詞建立共鳴
-   - 引導技巧：是否用引導語言讓客戶想像
-
-3. 提問品質
-   - 開放式vs封閉式問題比例
-   - 是否深入探詢需求
-
-4. 應對策略評估
-   - 策略是否符合客戶態度
-   - 做得好的地方
-   - 需要改進的地方
-
-5. 具體改進建議（3-5個，附範例對話）
-
-請條列式呈現，避免學術術語，要讓業務員能直接理解應用。`;
-
+    // 呼叫 Claude API
     const message = await anthropic.messages.create({
-      model: "claude-sonnet-4-5-20250929",  // 使用正確的模型名稱
+      model: "claude-sonnet-4-20250514",
       max_tokens: 2000,
-      messages: [{
-        role: "user",
-        content: analysisPrompt
-      }]
+      messages: [
+        {
+          role: "user",
+          content: analysisPrompt,
+        },
+      ],
     });
 
-    const report = message.content[0].type === 'text' 
-      ? message.content[0].text.split('\n') 
-      : [];
+    // 提取分析結果
+    const content = message.content[0];
+    let analysisText = "";
 
-    return Response.json({ 
+    if (content.type === "text") {
+      analysisText = content.text;
+    }
+
+    // 將分析文本轉換為行陣列
+    const reportLines = analysisText.split("\n").filter(line => line.trim());
+
+    return NextResponse.json({
       success: true,
-      report 
+      report: reportLines,
     });
-
   } catch (error) {
-    console.error('Analysis error:', error);
-    return Response.json({ 
-      success: false,
-      error: 'Failed to analyze conversation' 
-    }, { status: 500 });
+    console.error("分析錯誤:", error);
+    return NextResponse.json(
+      {
+        success: false,
+        error: error instanceof Error ? error.message : "未知錯誤",
+      },
+      { status: 500 }
+    );
   }
+}
+
+function buildAnalysisPrompt(
+  transcript: string,
+  attitude: string,
+  topic: string,
+  gender: string,
+  age: number,
+  job: string,
+  rapportData?: any
+): string {
+  // 態度類型的中文描述
+  const attitudeLabels: Record<string, string> = {
+    neutral: "中立態度（基礎）",
+    avoidant: "迴避態度（中難）",
+    skeptical: "質疑態度（高難）",
+    has_insurance: "已有保險（實戰）",
+  };
+
+  // 場景類型的中文描述
+  const topicLabels: Record<string, string> = {
+    phone_invite: "電話約訪",
+    product_marketing: "商品推銷",
+    objection_handling: "處理異議",
+  };
+
+  const attitudeLabel = attitudeLabels[attitude] || attitude;
+  const topicLabel = topicLabels[topic] || topic;
+
+  let prompt = `你是一位資深的保險銷售訓練專家，專精於分析業務員的對話表現並提供建設性的反饋。
+
+訓練場景資訊：
+- 場景：${topicLabel}
+- 客戶類型：${gender === "male" ? "男性" : "女性"}，${age} 歲，職業為 ${job}
+- 客戶態度：${attitudeLabel}
+
+對話記錄：
+${transcript}
+`;
+
+  // 如果有客情資料，加入客情分析的指引
+  if (rapportData && rapportData.summary) {
+    prompt += `
+
+${rapportData.summary}
+
+【分析框架說明】
+本次訓練使用了基於「薩提爾冰山理論」和「台灣語用學」的客情分析系統。系統即時追蹤了對話過程中的客戶信任度變化，識別了關鍵的語意模式，並記錄了每次客情變化的觸發因素。
+
+薩提爾冰山理論認為，人的外在行為（水平面以上）只是內在運作的一小部分，水平面以下包含了感受、觀點、期待、渴望與自我。在純文字分析中，我們透過句法結構與詞彙選擇來推導客戶的深層心理狀態。
+
+系統識別的四種應對姿態：
+1. 討好型（Placating）：忽略自己真實感受，使用模糊限制語、被動語態，表面順從但實際無意願
+2. 指責型（Blaming）：為保護自己而先發制人，使用反問句、負面評價詞、絕對化副詞
+3. 超理智型（Super-Reasonable）：忽略人與感受，使用專業術語、複雜句型、強調因果邏輯
+4. 打岔型（Irrelevant）：避開壓力而轉移焦點，話題斷裂、答非所問、使用無意義填充詞
+
+台灣高語境文化特色：
+- 客戶很少直接表達「拒絕」或「不滿」，以免損害雙方面子
+- 「我再考慮看看」、「回去跟太太商量」、「最近比較忙」等都是「軟性拒絕」的代名詞
+- 「是不錯啦，但是...」是典型的「假性同意」，重點在轉折詞之後
+- 沉默、單字回應（喔、嗯）代表消極抵抗和禮貌性敷衍
+`;
+  }
+
+  prompt += `
+
+請提供專業的訓練分析報告，包含以下維度：
+
+1. 【整體表現概述】
+   - 簡要總結業務員在這次訓練中的整體表現
+   - 特別指出做得最好的 2-3 個亮點
+   - 指出最需要改進的 1-2 個問題
+
+2. 【對話技巧分析】
+   - 開場方式是否恰當
+   - 提問技巧的運用（開放式 vs. 封閉式）
+   - 聆聽與回應的品質
+   - 異議處理的方式
+`;
+
+  if (rapportData && rapportData.summary) {
+    prompt += `
+3. 【客情管理分析】⭐ 重點分析區域
+   - 客情整體軌跡：從初始 ${rapportData.initialScore} 分變化到最終 ${rapportData.finalScore} 分，總體${rapportData.finalScore - rapportData.initialScore >= 0 ? "提升" : "下降"} ${Math.abs(rapportData.finalScore - rapportData.initialScore)} 分
+   - 如果有客情變化事件，請分析：
+     * 哪些時刻客情顯著提升？業務員做對了什麼？
+     * 哪些時刻客情顯著下降？觸發了什麼語意模式？背後的心理機制是什麼？
+     * 業務員是否注意到客戶的應對姿態（討好型、指責型、超理智型、打岔型）？
+     * 業務員的回應策略是否適配客戶的心理狀態？
+   - 客情管理的優勢與待改進之處
+   - 具體建議：下次面對類似客戶時，應該如何調整策略以更好地建立信任？
+
+4. 【具體改進建議】
+`;
+  } else {
+    prompt += `
+3. 【具體改進建議】
+`;
+  }
+
+  prompt += `   - 針對本次訓練中暴露的問題，提供 3-5 條具體、可操作的改進建議
+   - 每條建議要說明：(1) 問題是什麼 (2) 為什麼這樣做不好 (3) 應該怎麼做
+   - 建議要具體到可以在下次訓練中立即實踐
+
+${rapportData && rapportData.summary ? "5" : "4"}. 【鼓勵與總結】
+   - 以正面、鼓勵的語氣總結
+   - 強調成長的可能性和訓練的價值
+   - 給予下一步行動的方向
+
+【分析要求】
+- 使用繁體中文撰寫
+- 語氣專業但友善，像資深前輩在指導後輩
+- 避免空泛的讚美或批評，所有評價都要有具體的對話內容作為依據
+- 特別關注台灣保險銷售的文化特性
+${rapportData && rapportData.summary ? "- 客情管理分析是本次報告的重點，請深入探討業務員如何影響客戶的信任度" : ""}
+- 不要使用項目符號或編號列表，請用完整的段落和句子來表達
+- 使用適當的分段來組織內容，但不要使用標題編號
+- 保持自然的敘述流暢性
+
+請開始你的專業分析。`;
+
+  return prompt;
 }
