@@ -1,5 +1,5 @@
 // 客情規則庫 - 基於薩提爾冰山理論與台灣語用學研究
-// 此規則庫包含25個語意模式，涵蓋電話約訪、商品銷售和爭議處理三大場景
+// 此規則庫包含 40 個語意模式：25 個負面規則 + 15 個正向規則
 
 // 場景類型定義
 export type Scenario = "phone_invite" | "product_marketing" | "objection_handling";
@@ -8,31 +8,265 @@ export type Scenario = "phone_invite" | "product_marketing" | "objection_handlin
 export type CustomerType = "neutral" | "avoidant" | "skeptical" | "has_insurance";
 
 // 薩提爾應對姿態類型
-export type SatirPosture = "placating" | "blaming" | "super_reasonable" | "irrelevant";
+export type SatirPosture = "placating" | "blaming" | "super_reasonable" | "irrelevant" | "congruent";
+
+// 規則類型：negative 表示客戶的負面反應，positive 表示業務員的正向行為
+export type RuleType = "negative" | "positive";
 
 // 單一規則的資料結構
 export interface RapportRule {
-  id: string;                          // 規則唯一識別碼
-  scenario: Scenario;                  // 適用場景
-  customerType: CustomerType;          // 適用客戶類型
-  satir_posture: SatirPosture;        // 對應的薩提爾姿態
-  keywords: string[];                  // 關鍵字列表（用於快速匹配）
-  sentencePatterns?: string[];         // 句法模式描述（可選，用於更精確的判斷）
-  intentClassification: string;        // 意圖分類標籤
-  psychologyExplanation: string;       // 心理機制說明
-  rapportStrategy: string;             // 應對策略
-  responseGuide: string;               // 話術指引範例
-  rapportImpactScore: number;          // 客情影響分數（負數表示降低，正數表示提升）
-  weight: number;                      // 規則權重（某些規則影響力更大）
+  id: string;
+  ruleType: RuleType;
+  scenario: Scenario | Scenario[];
+  customerType?: CustomerType;
+  satir_posture: SatirPosture;
+  keywords: string[];
+  sentencePatterns?: string[];
+  intentClassification: string;
+  psychologyExplanation: string;
+  rapportStrategy: string;
+  responseGuide: string;
+  rapportImpactScore: number;
+  weight: number;
 }
 
 // ============================================
-// 場景一：電話約訪 (Tele-Appointment)
+// 正向規則：業務員的高信任感語言模式
 // ============================================
 
-// 迴避態度：假性忙碌與反射性拒絕
+const positiveEmpathy: RapportRule = {
+  id: "positive_empathy_expression",
+  ruleType: "positive",
+  scenario: ["product_marketing", "objection_handling"],
+  satir_posture: "congruent",
+  keywords: ["我理解", "我明白", "我了解", "我知道", "我感覺得到", "我能體會"],
+  sentencePatterns: ["同理心詞彙", "對客戶感受的確認"],
+  intentClassification: "同理心表達 (Empathy Expression)",
+  psychologyExplanation: "薩提爾一致性溝通的核心。透過語言明確表達對客戶感受的理解，降低杏仁核的防衛反應，促進催產素釋放，建立情感連結。",
+  rapportStrategy: "在客戶表達困難或疑慮時，立即給予同理，讓客戶感到被理解而非被推銷。",
+  responseGuide: "我完全理解您的考量...",
+  rapportImpactScore: 5,
+  weight: 1.2
+};
+
+const positiveFaceSaving: RapportRule = {
+  id: "positive_face_saving_buffer",
+  ruleType: "positive",
+  scenario: ["product_marketing", "objection_handling"],
+  satir_posture: "congruent",
+  keywords: ["很正常", "可以理解", "很多人", "這是合理的", "我也會這樣想", "確實"],
+  sentencePatterns: ["正常化客戶觀點", "避免直接否定"],
+  intentClassification: "面子保護緩衝 (Face-Saving Buffer)",
+  psychologyExplanation: "台灣高語境文化的核心技巧。先肯定客戶的想法或顧慮是正常的，保護其面子，然後再進行觀念引導。避免讓客戶感到被指正或批評。",
+  rapportStrategy: "當客戶有錯誤觀念或異議時，先正常化其想法，再進行 Pacing and Leading。",
+  responseGuide: "這個想法很正常，很多客戶一開始也這樣認為...",
+  rapportImpactScore: 4,
+  weight: 1.0
+};
+
+const positiveEmpowerment: RapportRule = {
+  id: "positive_empowerment_validation",
+  ruleType: "positive",
+  scenario: ["product_marketing", "objection_handling"],
+  satir_posture: "congruent",
+  keywords: ["您很內行", "您的觀念很好", "您很精明", "您很懂", "您說得對", "您很專業", "您很有遠見"],
+  sentencePatterns: ["肯定客戶能力", "讚美客戶特質"],
+  intentClassification: "賦權與肯定 (Empowerment & Validation)",
+  psychologyExplanation: "特別適用於指責型和超理智型客戶。透過肯定其能力和判斷，滿足其優越感需求，將其從對立面轉化為盟友。基於薩提爾的賦權策略。",
+  rapportStrategy: "面對挑剔或展現專業知識的客戶，不要反駁，而是肯定其標準高、眼光好。",
+  responseGuide: "您對這些細節這麼在意，可見您是非常謹慎的人...",
+  rapportImpactScore: 6,
+  weight: 1.3
+};
+
+const positiveSafetyProvision: RapportRule = {
+  id: "positive_safety_provision",
+  ruleType: "positive",
+  scenario: ["product_marketing", "objection_handling"],
+  satir_posture: "congruent",
+  keywords: ["我們會陪著您", "不用擔心", "很安全", "穩健", "我們一步一步", "我會協助您", "放心"],
+  sentencePatterns: ["提供安全感", "陪伴承諾"],
+  intentClassification: "安全感提供 (Safety Provision)",
+  psychologyExplanation: "特別適用於討好型客戶。討好型客戶害怕做錯決定，需要強大的安全感和引導。透過承諾陪伴和支持，降低其決策焦慮。",
+  rapportStrategy: "當客戶表現猶豫或焦慮時，提供明確的支持和陪伴承諾。",
+  responseGuide: "別擔心，我們會一步一步陪著您完成，您不需要一個人承擔。",
+  rapportImpactScore: 5,
+  weight: 1.1
+};
+
+const positiveOpenQuestion: RapportRule = {
+  id: "positive_open_ended_question",
+  ruleType: "positive",
+  scenario: ["product_marketing", "objection_handling"],
+  satir_posture: "congruent",
+  keywords: ["您覺得", "您認為", "您的想法", "請問", "想請教", "您希望", "您需要"],
+  sentencePatterns: ["開放式問句", "徵詢意見"],
+  intentClassification: "開放式探索問題 (Open-Ended Discovery)",
+  psychologyExplanation: "展現對客戶意見的重視，給予其表達空間和掌控感。開放式問題能引導客戶自我探索需求，比封閉式問題更能建立信任。",
+  rapportStrategy: "用開放式問題了解客戶真實需求，避免直接推銷或假設客戶需求。",
+  responseGuide: "您覺得什麼樣的保障規劃會讓您比較安心？",
+  rapportImpactScore: 3,
+  weight: 0.9
+};
+
+const positiveHonestyFrame: RapportRule = {
+  id: "positive_honesty_transparency",
+  ruleType: "positive",
+  scenario: ["product_marketing", "objection_handling"],
+  satir_posture: "congruent",
+  keywords: ["我要誠實說", "實話告訴您", "我必須坦白", "老實說", "據實說明", "透明地講"],
+  sentencePatterns: ["誠實框架", "透明揭露"],
+  intentClassification: "透明誠實框架 (Honesty Frame)",
+  psychologyExplanation: "在台灣保險市場信任赤字的背景下，主動的誠實揭露是建立信任的關鍵。特別適用於投資型保單等敏感商品的說明。",
+  rapportStrategy: "在說明產品風險或限制時，主動使用誠實框架，展現專業誠信。",
+  responseGuide: "我要跟您誠實說明，這個商品確實有市場風險...",
+  rapportImpactScore: 7,
+  weight: 1.4
+};
+
+const positiveAutonomy: RapportRule = {
+  id: "positive_decision_autonomy",
+  ruleType: "positive",
+  scenario: ["product_marketing", "objection_handling"],
+  satir_posture: "congruent",
+  keywords: ["不急", "慢慢考慮", "沒有壓力", "您決定就好", "不勉強", "隨時都可以", "給您時間"],
+  sentencePatterns: ["尊重決策權", "減壓用語"],
+  intentClassification: "尊重決策自主權 (Decision Autonomy)",
+  psychologyExplanation: "降低客戶的杏仁核戒備反應。越是強調不強迫，客戶越感到安全，反而更願意考慮。這是反向心理學的應用。",
+  rapportStrategy: "在適當時機表達不施壓，給予客戶心理空間。",
+  responseGuide: "這個決定很重要，您慢慢考慮，沒有時間壓力。",
+  rapportImpactScore: 4,
+  weight: 1.0
+};
+
+const positiveConcreteSolution: RapportRule = {
+  id: "positive_concrete_solution",
+  ruleType: "positive",
+  scenario: ["product_marketing", "objection_handling"],
+  satir_posture: "congruent",
+  keywords: ["具體來說", "我們可以", "有個方法", "這樣規劃", "舉例來說", "比如說", "實際上"],
+  sentencePatterns: ["提供具體方案", "實例說明"],
+  intentClassification: "具體方案提供 (Concrete Solution)",
+  psychologyExplanation: "將抽象的保險概念轉化為具體可行的方案，降低認知負擔。具體性能增加可信度和可行性感知。",
+  rapportStrategy: "當客戶表達預算或其他顧慮時，提供具體的、可操作的解決方案。",
+  responseGuide: "具體來說，如果我們把保費分攤到每天，其實只是一杯咖啡的錢...",
+  rapportImpactScore: 5,
+  weight: 1.1
+};
+
+const positiveThirdPartyProof: RapportRule = {
+  id: "positive_social_proof",
+  ruleType: "positive",
+  scenario: ["product_marketing", "objection_handling"],
+  satir_posture: "congruent",
+  keywords: ["很多客戶", "大家都", "大部分人", "我們服務過", "普遍的選擇", "市場上"],
+  sentencePatterns: ["社會認證", "他人經驗"],
+  intentClassification: "社會認證 (Social Proof)",
+  psychologyExplanation: "利用從眾心理降低決策風險感知。特別適用於討好型客戶，他們傾向於跟隨多數人的選擇以避免犯錯。",
+  rapportStrategy: "提供其他客戶的經驗或選擇，但要真實不能捏造。",
+  responseGuide: "很多跟您情況類似的客戶都選擇這個方案，反應都很好。",
+  rapportImpactScore: 4,
+  weight: 1.0
+};
+
+const positivePersonalCommitment: RapportRule = {
+  id: "positive_personal_commitment",
+  ruleType: "positive",
+  scenario: ["product_marketing", "objection_handling"],
+  satir_posture: "congruent",
+  keywords: ["我保證", "我承諾", "我負責", "我會確保", "您可以信任我", "我向您保證"],
+  sentencePatterns: ["個人承諾", "責任擔當"],
+  intentClassification: "個人服務承諾 (Personal Commitment)",
+  psychologyExplanation: "將公司的抽象信任轉化為對業務員個人的信任。在台灣的關係文化中，人與人之間的信任往往強於對組織的信任。",
+  rapportStrategy: "在適當時機做出個人服務承諾，但必須是自己能做到的。",
+  responseGuide: "我向您保證，無論將來發生什麼狀況，我都會親自協助您處理理賠。",
+  rapportImpactScore: 6,
+  weight: 1.2
+};
+
+const positiveValueReframe: RapportRule = {
+  id: "positive_value_reframe",
+  ruleType: "positive",
+  scenario: ["product_marketing", "objection_handling"],
+  satir_posture: "congruent",
+  keywords: ["不是費用而是", "這代表", "真正的價值", "長遠來看", "換個角度", "其實是"],
+  sentencePatterns: ["重新框架", "價值轉化"],
+  intentClassification: "價值重新框架 (Value Reframing)",
+  psychologyExplanation: "NLP 的核心技巧。將客戶認知中的「成本」重新框架為「投資」或「保障」，改變其心理帳戶的分類。",
+  rapportStrategy: "當客戶關注價格時,重新框架為價值、保障或責任。",
+  responseGuide: "這不只是一筆費用，這代表著您對家人的承諾和責任。",
+  rapportImpactScore: 5,
+  weight: 1.1
+};
+
+const positiveGuanxiBuilding: RapportRule = {
+  id: "positive_guanxi_connection",
+  ruleType: "positive",
+  scenario: ["phone_invite", "product_marketing"],
+  satir_posture: "congruent",
+  keywords: ["有緣", "認識您是我的榮幸", "交個朋友", "長期合作", "互相照應", "建立關係"],
+  sentencePatterns: ["關係建立", "人情連結"],
+  intentClassification: "關係資本建立 (Guanxi Building)",
+  psychologyExplanation: "台灣商業文化的核心。將交易關係轉化為人際關係，建立長期的互惠網絡。這符合台灣的集體主義文化價值觀。",
+  rapportStrategy: "在適當時機表達希望建立長期關係而非一次性交易。",
+  responseGuide: "能認識您是我的榮幸，希望未來能有機會為您服務。",
+  rapportImpactScore: 4,
+  weight: 1.0
+};
+
+const positiveStructureProvision: RapportRule = {
+  id: "positive_structure_guidance",
+  ruleType: "positive",
+  scenario: ["product_marketing", "objection_handling"],
+  satir_posture: "congruent",
+  keywords: ["我們分三個步驟", "首先", "接下來", "最後", "整個流程", "讓我說明"],
+  sentencePatterns: ["提供結構", "步驟說明"],
+  intentClassification: "結構與引導提供 (Structure Provision)",
+  psychologyExplanation: "薩提爾變革模型中的關鍵。在客戶面對複雜資訊感到混亂時，提供清晰的結構能降低焦慮，增加掌控感。",
+  rapportStrategy: "將複雜的保險資訊拆解為清晰的步驟或架構。",
+  responseGuide: "讓我用三個步驟跟您說明這個規劃...",
+  rapportImpactScore: 3,
+  weight: 0.9
+};
+
+const positiveFlexibility: RapportRule = {
+  id: "positive_flexibility_adaptation",
+  ruleType: "positive",
+  scenario: ["product_marketing", "objection_handling"],
+  satir_posture: "congruent",
+  keywords: ["我們可以調整", "彈性規劃", "客製化", "配合您的", "有其他方案", "可以修改"],
+  sentencePatterns: ["展現彈性", "客製化意願"],
+  intentClassification: "彈性與適應性 (Flexibility & Adaptation)",
+  psychologyExplanation: "展現願意為客戶調整方案的態度，讓客戶感到被重視。避免給人「一套方案賣給所有人」的制式化印象。",
+  rapportStrategy: "當客戶表達特殊需求或預算限制時，展現調整意願。",
+  responseGuide: "這個方案我們可以根據您的預算來調整，不是固定的。",
+  rapportImpactScore: 4,
+  weight: 1.0
+};
+
+const positiveRiskAwareness: RapportRule = {
+  id: "positive_risk_disclosure",
+  ruleType: "positive",
+  scenario: ["product_marketing"],
+  satir_posture: "congruent",
+  keywords: ["必須注意", "有風險", "除外責任", "限制條件", "這點要特別說明", "可能的狀況"],
+  sentencePatterns: ["風險揭露", "限制說明"],
+  intentClassification: "主動風險揭露 (Proactive Risk Disclosure)",
+  psychologyExplanation: "反向操作的信任建立。主動揭露產品限制和風險，展現專業誠信，反而能增加客戶對業務員的信任。",
+  rapportStrategy: "在客戶詢問前，主動說明產品的限制和除外責任。",
+  responseGuide: "這個商品確實很好，但有幾點除外責任我必須跟您說明清楚...",
+  rapportImpactScore: 6,
+  weight: 1.3
+};
+
+// ============================================
+// 場景一：電話約訪 (Tele-Appointment)
+// 負面規則
+// ============================================
+
 const teleAvoidantBusyExcuse: RapportRule = {
   id: "tele_avoidant_busy_excuse",
+  ruleType: "negative",
   scenario: "phone_invite",
   customerType: "avoidant",
   satir_posture: "irrelevant",
@@ -48,6 +282,7 @@ const teleAvoidantBusyExcuse: RapportRule = {
 
 const teleAvoidantSendInfo: RapportRule = {
   id: "tele_avoidant_send_info_only",
+  ruleType: "negative",
   scenario: "phone_invite",
   customerType: "avoidant",
   satir_posture: "irrelevant",
@@ -61,9 +296,9 @@ const teleAvoidantSendInfo: RapportRule = {
   weight: 1.0
 };
 
-// 質疑態度：信任測試與隱私焦慮
 const teleSkepticalDataSource: RapportRule = {
   id: "tele_skeptical_data_source",
+  ruleType: "negative",
   scenario: "phone_invite",
   customerType: "skeptical",
   satir_posture: "blaming",
@@ -79,6 +314,7 @@ const teleSkepticalDataSource: RapportRule = {
 
 const teleSkepticalUnwantedCall: RapportRule = {
   id: "tele_skeptical_unwanted_cold_call",
+  ruleType: "negative",
   scenario: "phone_invite",
   customerType: "skeptical",
   satir_posture: "blaming",
@@ -92,9 +328,9 @@ const teleSkepticalUnwantedCall: RapportRule = {
   weight: 1.5
 };
 
-// 中立態度：誘因驅動與無效回應
 const teleNeutralCuriosity: RapportRule = {
   id: "tele_neutral_curiosity",
+  ruleType: "negative",
   scenario: "phone_invite",
   customerType: "neutral",
   satir_posture: "placating",
@@ -110,6 +346,7 @@ const teleNeutralCuriosity: RapportRule = {
 
 const teleNeutralHurried: RapportRule = {
   id: "tele_neutral_hurried",
+  ruleType: "negative",
   scenario: "phone_invite",
   customerType: "neutral",
   satir_posture: "irrelevant",
@@ -123,9 +360,9 @@ const teleNeutralHurried: RapportRule = {
   weight: 1.2
 };
 
-// 已有保險：專業傲慢與飽和感
 const teleInsuredSaturation: RapportRule = {
   id: "tele_insured_saturation",
+  ruleType: "negative",
   scenario: "phone_invite",
   customerType: "has_insurance",
   satir_posture: "super_reasonable",
@@ -141,6 +378,7 @@ const teleInsuredSaturation: RapportRule = {
 
 const teleInsuredFriendAgent: RapportRule = {
   id: "tele_insured_friend_agent",
+  ruleType: "negative",
   scenario: "phone_invite",
   customerType: "has_insurance",
   satir_posture: "placating",
@@ -156,15 +394,16 @@ const teleInsuredFriendAgent: RapportRule = {
 
 // ============================================
 // 場景二：商品銷售 (Product Sales)
+// 負面規則（部分規則同時適用於異議處理）
 // ============================================
 
-// 中立態度：假性同意與無效溝通
 const salesNeutralPassiveListening: RapportRule = {
   id: "sales_neutral_passive_listening",
-  scenario: "product_marketing",
+  ruleType: "negative",
+  scenario: ["product_marketing", "objection_handling"],
   customerType: "neutral",
   satir_posture: "placating",
-  keywords: ["喔", "嗯", "是喔", "嘿", "好", "嗯嗯"],
+  keywords: ["喔", "嗯", "是喔", "嘿", "好"],
   sentencePatterns: ["單字回應", "極短句", "無主動提問"],
   intentClassification: "禮貌性敷衍 (Polite Disengagement)",
   psychologyExplanation: "薩提爾『討好型』：不想當面拒絕傷和氣，但實際上心不在焉（人在心不在）。",
@@ -176,7 +415,8 @@ const salesNeutralPassiveListening: RapportRule = {
 
 const salesNeutralAmbiguousAffirmation: RapportRule = {
   id: "sales_neutral_ambiguous_affirmation",
-  scenario: "product_marketing",
+  ruleType: "negative",
+  scenario: ["product_marketing", "objection_handling"],
   customerType: "neutral",
   satir_posture: "placating",
   keywords: ["是不錯", "還可以", "沒意見", "都可以", "不錯啦"],
@@ -191,7 +431,8 @@ const salesNeutralAmbiguousAffirmation: RapportRule = {
 
 const salesNeutralSilent: RapportRule = {
   id: "sales_neutral_silent",
-  scenario: "product_marketing",
+  ruleType: "negative",
+  scenario: ["product_marketing", "objection_handling"],
   customerType: "neutral",
   satir_posture: "irrelevant",
   keywords: ["...", "嗯哼"],
@@ -204,10 +445,10 @@ const salesNeutralSilent: RapportRule = {
   weight: 1.3
 };
 
-// 迴避態度：權威轉移與軟性拒絕
 const salesAvoidantSoftRejectionConsider: RapportRule = {
   id: "sales_avoidant_soft_rejection_consider",
-  scenario: "product_marketing",
+  ruleType: "negative",
+  scenario: ["product_marketing", "objection_handling"],
   customerType: "avoidant",
   satir_posture: "placating",
   keywords: ["再看看", "考慮一下", "再研究", "回去想", "不急", "想一想"],
@@ -222,7 +463,8 @@ const salesAvoidantSoftRejectionConsider: RapportRule = {
 
 const salesAvoidantAuthorityDeferral: RapportRule = {
   id: "sales_avoidant_authority_deferral",
-  scenario: "product_marketing",
+  ruleType: "negative",
+  scenario: ["product_marketing", "objection_handling"],
   customerType: "avoidant",
   satir_posture: "placating",
   keywords: ["問老婆", "問老公", "家人", "商量", "作主", "太太", "先生"],
@@ -237,7 +479,8 @@ const salesAvoidantAuthorityDeferral: RapportRule = {
 
 const salesAvoidantBudgetExcuse: RapportRule = {
   id: "sales_avoidant_budget_excuse",
-  scenario: "product_marketing",
+  ruleType: "negative",
+  scenario: ["product_marketing", "objection_handling"],
   customerType: "avoidant",
   satir_posture: "irrelevant",
   keywords: ["沒錢", "太貴", "手頭緊", "最近花費大", "吃土", "負擔不起"],
@@ -252,7 +495,8 @@ const salesAvoidantBudgetExcuse: RapportRule = {
 
 const salesAvoidantSelfDeprecating: RapportRule = {
   id: "sales_avoidant_self_deprecating",
-  scenario: "product_marketing",
+  ruleType: "negative",
+  scenario: ["product_marketing", "objection_handling"],
   customerType: "avoidant",
   satir_posture: "placating",
   keywords: ["我不懂啦", "我很笨", "你決定就好", "隨緣", "看你"],
@@ -265,10 +509,10 @@ const salesAvoidantSelfDeprecating: RapportRule = {
   weight: 0.9
 };
 
-// 質疑態度：價值挑戰與比較心態
 const salesSkepticalPriceCompare: RapportRule = {
   id: "sales_skeptical_price_compare",
-  scenario: "product_marketing",
+  ruleType: "negative",
+  scenario: ["product_marketing", "objection_handling"],
   customerType: "skeptical",
   satir_posture: "blaming",
   keywords: ["別家", "便宜", "網路上", "CP值", "貴", "比較"],
@@ -283,7 +527,8 @@ const salesSkepticalPriceCompare: RapportRule = {
 
 const salesSkepticalFinePrint: RapportRule = {
   id: "sales_skeptical_fine_print",
-  scenario: "product_marketing",
+  ruleType: "negative",
+  scenario: ["product_marketing", "objection_handling"],
   customerType: "skeptical",
   satir_posture: "blaming",
   keywords: ["陷阱", "文字遊戲", "不賠", "看清楚", "條款", "除外"],
@@ -298,7 +543,8 @@ const salesSkepticalFinePrint: RapportRule = {
 
 const salesSkepticalReputation: RapportRule = {
   id: "sales_skeptical_reputation",
-  scenario: "product_marketing",
+  ruleType: "negative",
+  scenario: ["product_marketing", "objection_handling"],
   customerType: "skeptical",
   satir_posture: "blaming",
   keywords: ["網評", "負評", "那家公司", "新聞", "爛", "評價"],
@@ -313,7 +559,8 @@ const salesSkepticalReputation: RapportRule = {
 
 const salesSkepticalReturnRate: RapportRule = {
   id: "sales_skeptical_return_rate",
-  scenario: "product_marketing",
+  ruleType: "negative",
+  scenario: ["product_marketing", "objection_handling"],
   customerType: "skeptical",
   satir_posture: "super_reasonable",
   keywords: ["利率", "定存", "股票", "通膨", "划不來", "報酬率"],
@@ -326,10 +573,10 @@ const salesSkepticalReturnRate: RapportRule = {
   weight: 1.2
 };
 
-// 已有保險：知識主導
 const salesInsuredKnowItAll: RapportRule = {
   id: "sales_insured_know_it_all",
-  scenario: "product_marketing",
+  ruleType: "negative",
+  scenario: ["product_marketing", "objection_handling"],
   customerType: "has_insurance",
   satir_posture: "super_reasonable",
   keywords: ["那個我知道", "不用解釋", "我看過", "簡單講", "懂"],
@@ -344,10 +591,12 @@ const salesInsuredKnowItAll: RapportRule = {
 
 // ============================================
 // 場景三：爭議處理 (Dispute Resolution)
+// 負面規則
 // ============================================
 
 const disputeSkepticalPreExisting: RapportRule = {
   id: "dispute_skeptical_pre_existing",
+  ruleType: "negative",
   scenario: "objection_handling",
   customerType: "skeptical",
   satir_posture: "blaming",
@@ -363,6 +612,7 @@ const disputeSkepticalPreExisting: RapportRule = {
 
 const disputeInsuredLegalThreat: RapportRule = {
   id: "dispute_insured_legal_threat",
+  ruleType: "negative",
   scenario: "objection_handling",
   customerType: "has_insurance",
   satir_posture: "blaming",
@@ -378,6 +628,7 @@ const disputeInsuredLegalThreat: RapportRule = {
 
 const disputeSkepticalAgentError: RapportRule = {
   id: "dispute_skeptical_agent_error",
+  ruleType: "negative",
   scenario: "objection_handling",
   customerType: "skeptical",
   satir_posture: "blaming",
@@ -393,6 +644,7 @@ const disputeSkepticalAgentError: RapportRule = {
 
 const disputeNeutralConfusion: RapportRule = {
   id: "dispute_neutral_confusion",
+  ruleType: "negative",
   scenario: "objection_handling",
   customerType: "neutral",
   satir_posture: "placating",
@@ -408,6 +660,7 @@ const disputeNeutralConfusion: RapportRule = {
 
 const disputeAvoidantGhosting: RapportRule = {
   id: "dispute_avoidant_ghosting",
+  ruleType: "negative",
   scenario: "objection_handling",
   customerType: "avoidant",
   satir_posture: "irrelevant",
@@ -421,9 +674,29 @@ const disputeAvoidantGhosting: RapportRule = {
   weight: 1.1
 };
 
-// 將所有規則匯出為一個陣列
+// ============================================
+// 匯出所有規則
+// ============================================
+
 export const RAPPORT_RULES: RapportRule[] = [
-  // 電話約訪場景
+  // 正向規則（15個）
+  positiveEmpathy,
+  positiveFaceSaving,
+  positiveEmpowerment,
+  positiveSafetyProvision,
+  positiveOpenQuestion,
+  positiveHonestyFrame,
+  positiveAutonomy,
+  positiveConcreteSolution,
+  positiveThirdPartyProof,
+  positivePersonalCommitment,
+  positiveValueReframe,
+  positiveGuanxiBuilding,
+  positiveStructureProvision,
+  positiveFlexibility,
+  positiveRiskAwareness,
+  
+  // 電話約訪場景（8個）
   teleAvoidantBusyExcuse,
   teleAvoidantSendInfo,
   teleSkepticalDataSource,
@@ -433,7 +706,7 @@ export const RAPPORT_RULES: RapportRule[] = [
   teleInsuredSaturation,
   teleInsuredFriendAgent,
   
-  // 商品銷售場景
+  // 商品銷售場景（14個，部分同時適用於異議處理）
   salesNeutralPassiveListening,
   salesNeutralAmbiguousAffirmation,
   salesNeutralSilent,
@@ -447,7 +720,7 @@ export const RAPPORT_RULES: RapportRule[] = [
   salesSkepticalReturnRate,
   salesInsuredKnowItAll,
   
-  // 爭議處理場景
+  // 爭議處理場景（5個）
   disputeSkepticalPreExisting,
   disputeInsuredLegalThreat,
   disputeSkepticalAgentError,
@@ -458,14 +731,54 @@ export const RAPPORT_RULES: RapportRule[] = [
 // 輔助函數：根據場景和客戶類型篩選相關規則
 export function getRelevantRules(
   scenario: Scenario,
-  customerType: CustomerType
+  customerType: CustomerType,
+  ruleType?: RuleType
 ): RapportRule[] {
-  return RAPPORT_RULES.filter(
-    rule => rule.scenario === scenario && rule.customerType === customerType
-  );
+  return RAPPORT_RULES.filter(rule => {
+    // 檢查場景匹配（支援單一場景或多場景陣列）
+    const scenarioMatch = Array.isArray(rule.scenario) 
+      ? rule.scenario.includes(scenario)
+      : rule.scenario === scenario;
+    
+    // 檢查客戶類型匹配（正向規則沒有 customerType，所以跳過檢查）
+    const customerTypeMatch = rule.ruleType === "positive" || rule.customerType === customerType;
+    
+    // 檢查規則類型匹配（如果有指定）
+    const ruleTypeMatch = !ruleType || rule.ruleType === ruleType;
+    
+    return scenarioMatch && customerTypeMatch && ruleTypeMatch;
+  });
 }
 
 // 輔助函數：根據規則ID查找特定規則
 export function getRuleById(id: string): RapportRule | undefined {
   return RAPPORT_RULES.find(rule => rule.id === id);
+}
+
+// 輔助函數：獲取所有正向規則
+export function getPositiveRules(scenario?: Scenario): RapportRule[] {
+  return RAPPORT_RULES.filter(rule => {
+    if (rule.ruleType !== "positive") return false;
+    if (!scenario) return true;
+    return Array.isArray(rule.scenario) 
+      ? rule.scenario.includes(scenario)
+      : rule.scenario === scenario;
+  });
+}
+
+// 輔助函數：獲取所有負面規則
+export function getNegativeRules(scenario?: Scenario, customerType?: CustomerType): RapportRule[] {
+  return RAPPORT_RULES.filter(rule => {
+    if (rule.ruleType !== "negative") return false;
+    
+    const scenarioMatch = !scenario || (
+      Array.isArray(rule.scenario) 
+        ? rule.scenario.includes(scenario)
+        : rule.scenario === scenario
+    );
+    
+    const customerTypeMatch = !customerType || rule.customerType === customerType;
+    
+    return scenarioMatch && customerTypeMatch;
+  });
 }
