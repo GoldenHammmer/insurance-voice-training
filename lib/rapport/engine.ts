@@ -3,46 +3,49 @@
 
 import { 
   RAPPORT_RULES, 
-  getRelevantRules, 
+  getRelevantRules,
+  getPositiveRules,
+  getNegativeRules,
   type RapportRule, 
   type Scenario, 
-  type CustomerType 
+  type CustomerType,
+  type RuleType
 } from './rules';
 
 // 分析結果的資料結構
 export interface AnalysisResult {
-  matchedRules: RapportRule[];           // 匹配到的規則列表
-  rapportChange: number;                 // 客情分數變化量
-  totalImpact: number;                   // 總影響分數（考慮權重後）
-  detectedPosture?: string;              // 偵測到的薩提爾姿態
-  suggestedStrategy?: string;            // 建議的應對策略
-  responseGuide?: string;                // 話術指引
+  matchedRules: RapportRule[];
+  rapportChange: number;
+  totalImpact: number;
+  detectedPosture?: string;
+  suggestedStrategy?: string;
+  responseGuide?: string;
 }
 
 // 客情狀態的資料結構
 export interface RapportStatus {
-  score: number;                         // 當前客情分數（0-100）
-  level: 'danger' | 'warning' | 'good';  // 客情等級
-  color: string;                         // 對應的顯示顏色
-  label: string;                         // 狀態標籤
-  description: string;                   // 狀態描述
-  advice: string;                        // 給業務員的建議
+  score: number;
+  level: 'danger' | 'warning' | 'good';
+  color: string;
+  label: string;
+  description: string;
+  advice: string;
 }
 
 // 客情事件記錄的資料結構
 export interface RapportEvent {
-  timestamp: Date;                       // 事件發生時間
-  speaker: 'user' | 'assistant';         // 說話者
-  utterance: string;                     // 發言內容
-  matchedRule?: RapportRule;             // 匹配到的規則
-  scoreBefore: number;                   // 變化前的分數
-  scoreAfter: number;                    // 變化後的分數
-  change: number;                        // 分數變化量
+  timestamp: Date;
+  speaker: 'user' | 'assistant';
+  utterance: string;
+  matchedRule?: RapportRule;
+  scoreBefore: number;
+  scoreAfter: number;
+  change: number;
 }
 
 /**
  * 分析單句話語，識別可能的語意模式
- * 這是引擎的核心函數，採用多層次的匹配策略
+ * 這是引擎的核心函數，採用雙軌分析策略
  */
 export function analyzeUtterance(
   utterance: string,
@@ -57,20 +60,28 @@ export function analyzeUtterance(
     totalImpact: 0
   };
 
-  // 只分析客戶（AI助理）的發言，因為客情變化主要由客戶反應決定
-  if (speaker !== 'assistant') {
-    return result;
-  }
-
   // 文字預處理：轉小寫、去除多餘空白
   const normalizedUtterance = utterance.toLowerCase().trim();
 
-  // 獲取當前情境下相關的規則集
-  const relevantRules = getRelevantRules(scenario, customerType);
+  // 如果文字太短（少於2個字），跳過分析
+  if (normalizedUtterance.length < 2) {
+    return result;
+  }
+
+  // 雙軌分析策略
+  let relevantRules: RapportRule[];
+  
+  if (speaker === 'assistant') {
+    // 客戶發言 → 檢查負面規則
+    relevantRules = getNegativeRules(scenario, customerType);
+  } else {
+    // 業務員發言 → 檢查正向規則
+    relevantRules = getPositiveRules(scenario);
+  }
 
   // 對每個規則進行匹配檢查
   for (const rule of relevantRules) {
-    if (isRuleMatched(normalizedUtterance, rule)) {
+    if (isRuleMatched(normalizedUtterance, rule, utterance)) {
       result.matchedRules.push(rule);
     }
   }
@@ -103,47 +114,96 @@ export function analyzeUtterance(
 
 /**
  * 檢查特定規則是否匹配當前的話語
- * 採用關鍵字匹配 + 句法特徵檢查的混合策略
+ * 採用關鍵字匹配 + 句法特徵檢查 + 台灣口語去歧義的混合策略
  */
-function isRuleMatched(utterance: string, rule: RapportRule): boolean {
+function isRuleMatched(
+  normalizedUtterance: string, 
+  rule: RapportRule,
+  originalUtterance: string
+): boolean {
   // 第一層檢查：關鍵字匹配
   const hasKeyword = rule.keywords.some(keyword => 
-    utterance.includes(keyword.toLowerCase())
+    normalizedUtterance.includes(keyword.toLowerCase())
   );
 
   if (!hasKeyword) {
-    return false; // 如果連關鍵字都沒有，直接排除
+    return false;
   }
 
-  // 第二層檢查：句法特徵（針對某些需要更精確判斷的規則）
-  // 這裡實作一些基本的句法檢查邏輯
+  // 台灣口語去歧義化檢查
+  const disambiguation = disambiguateTaiwaneseExpression(originalUtterance);
+  
+  // 特殊處理：「不好意思」的歧義
+  if (normalizedUtterance.includes('不好意思')) {
+    // 如果規則期待的是拒絕，但實際上是禮貌性發語詞，則不匹配
+    if (rule.intentClassification.includes('拒絕') && disambiguation.isPoliteOpening) {
+      return false;
+    }
+    // 如果規則期待的是禮貌，但實際上是拒絕，則不匹配
+    if (rule.intentClassification.includes('禮貌') && disambiguation.isRejection) {
+      return false;
+    }
+  }
+
+  // 特殊處理：「考慮」的歧義
+  if (normalizedUtterance.includes('考慮')) {
+    // 如果是真實考慮（有具體對象），則某些軟性拒絕規則不應觸發
+    if (disambiguation.isGenuineConsideration && 
+        rule.intentClassification.includes('Soft Rejection')) {
+      return false;
+    }
+  }
+
+  // 第二層檢查：句法特徵
+  if (!rule.sentencePatterns || rule.sentencePatterns.length === 0) {
+    return true; // 如果沒有句法限制，關鍵字匹配就足夠
+  }
 
   // 檢查是否為短句（用於識別敷衍、催促等）
-  if (rule.sentencePatterns?.includes('短句') && utterance.length > 20) {
+  if (rule.sentencePatterns.includes('短句') && originalUtterance.length > 20) {
     return false;
   }
 
   // 檢查是否為反問句（用於識別質疑態度）
-  if (rule.sentencePatterns?.includes('反問句')) {
-    const hasQuestionMark = utterance.includes('?') || utterance.includes('？');
-    const hasQuestionWord = /誰|什麼|為什麼|怎麼|哪裡/.test(utterance);
+  if (rule.sentencePatterns.includes('反問句')) {
+    const hasQuestionMark = originalUtterance.includes('?') || originalUtterance.includes('？');
+    const hasQuestionWord = /誰|什麼|為什麼|怎麼|哪裡|嗎/.test(originalUtterance);
     if (!hasQuestionMark && !hasQuestionWord) {
       return false;
     }
   }
 
   // 檢查是否包含比較級（用於識別價格比較）
-  if (rule.sentencePatterns?.includes('比較級')) {
-    const hasComparison = /比|更|較|還/.test(utterance);
+  if (rule.sentencePatterns.includes('比較級') || 
+      rule.sentencePatterns.includes('比較級句子')) {
+    const hasComparison = /比|更|較|還/.test(originalUtterance);
     if (!hasComparison) {
       return false;
     }
   }
 
   // 檢查是否包含否定詞（用於識別拒絕）
-  if (rule.sentencePatterns?.includes('否定句') || rule.sentencePatterns?.includes('拒絕')) {
-    const hasNegation = /不|沒|別|甭|免/.test(utterance);
+  if (rule.sentencePatterns.includes('否定句') || 
+      rule.sentencePatterns.includes('拒絕') ||
+      rule.sentencePatterns.includes('直接否定句')) {
+    const hasNegation = /不|沒|別|甭|免/.test(originalUtterance);
     if (!hasNegation) {
+      return false;
+    }
+  }
+
+  // 檢查是否為開放式問句（正向規則）
+  if (rule.sentencePatterns.includes('開放式問句')) {
+    const hasOpenQuestion = /您覺得|您認為|您的想法|請問|想請教|您希望|您需要/.test(originalUtterance);
+    if (!hasOpenQuestion) {
+      return false;
+    }
+  }
+
+  // 檢查是否包含同理心詞彙（正向規則）
+  if (rule.sentencePatterns.includes('同理心詞彙')) {
+    const hasEmpathy = /我理解|我明白|我了解|我知道|我感覺|我能體會/.test(originalUtterance);
+    if (!hasEmpathy) {
       return false;
     }
   }
@@ -166,9 +226,15 @@ export function calculateNewRapportScore(
   if (change > 0 && currentScore < 30) {
     // 低分時提升困難，效果打七折
     newScore = currentScore + (change * 0.7);
+  } else if (change > 0 && currentScore > 70) {
+    // 高分時提升效益遞減，效果打八折
+    newScore = currentScore + (change * 0.8);
   } else if (change < 0 && currentScore > 70) {
     // 高分時有信任儲備，下降影響打八折
     newScore = currentScore + (change * 0.8);
+  } else if (change < 0 && currentScore < 30) {
+    // 低分時下降影響加劇，效果放大到1.2倍
+    newScore = currentScore + (change * 1.2);
   }
 
   // 確保分數在 0-100 範圍內
@@ -184,7 +250,7 @@ export function getRapportStatus(score: number): RapportStatus {
     return {
       score,
       level: 'danger',
-      color: '#ef4444', // 紅色
+      color: '#ef4444',
       label: '關係危險',
       description: '客戶防備心很重，隨時可能中斷對話',
       advice: '立即調整策略，避免推銷話術，專注建立信任'
@@ -193,7 +259,7 @@ export function getRapportStatus(score: number): RapportStatus {
     return {
       score,
       level: 'warning',
-      color: '#f59e0b', // 黃色
+      color: '#f59e0b',
       label: '關係普通',
       description: '客戶願意聽但還沒有信任',
       advice: '使用開放式問題，展現同理心，逐步建立連結'
@@ -202,7 +268,7 @@ export function getRapportStatus(score: number): RapportStatus {
     return {
       score,
       level: 'good',
-      color: '#10b981', // 綠色
+      color: '#10b981',
       label: '關係良好',
       description: '客戶對你有信任感，願意深入交流',
       advice: '保持當前節奏，可以適度引入產品討論'
@@ -247,7 +313,7 @@ export function analyzeConversationHistory(
         timestamp: new Date(),
         speaker: turn.role,
         utterance: turn.content,
-        matchedRule: analysis.matchedRules[0], // 記錄主要規則
+        matchedRule: analysis.matchedRules[0],
         scoreBefore,
         scoreAfter: currentScore,
         change: analysis.rapportChange
@@ -294,16 +360,34 @@ export function generateRapportSummary(
     lines.push(`偵測到 ${events.length} 個客情變化事件：`);
     lines.push('');
 
-    events.forEach((event, index) => {
-      lines.push(`事件 ${index + 1}：`);
-      lines.push(`- 客戶說：「${event.utterance}」`);
-      if (event.matchedRule) {
-        lines.push(`- 識別模式：${event.matchedRule.intentClassification}`);
-        lines.push(`- 心理分析：${event.matchedRule.psychologyExplanation}`);
-      }
-      lines.push(`- 客情變化：${event.scoreBefore} → ${event.scoreAfter} (${event.change > 0 ? '+' : ''}${event.change})`);
-      lines.push('');
-    });
+    // 分別統計正向和負向事件
+    const positiveEvents = events.filter(e => e.change > 0);
+    const negativeEvents = events.filter(e => e.change < 0);
+
+    if (positiveEvents.length > 0) {
+      lines.push(`正向事件（${positiveEvents.length}次）：`);
+      positiveEvents.forEach((event, index) => {
+        lines.push(`${index + 1}. ${event.speaker === 'user' ? '業務員' : '客戶'}說：「${event.utterance.substring(0, 50)}${event.utterance.length > 50 ? '...' : ''}」`);
+        if (event.matchedRule) {
+          lines.push(`   識別模式：${event.matchedRule.intentClassification}`);
+        }
+        lines.push(`   客情變化：${event.scoreBefore} → ${event.scoreAfter} (+${event.change})`);
+        lines.push('');
+      });
+    }
+
+    if (negativeEvents.length > 0) {
+      lines.push(`負向事件（${negativeEvents.length}次）：`);
+      negativeEvents.forEach((event, index) => {
+        lines.push(`${index + 1}. ${event.speaker === 'user' ? '業務員' : '客戶'}說：「${event.utterance.substring(0, 50)}${event.utterance.length > 50 ? '...' : ''}」`);
+        if (event.matchedRule) {
+          lines.push(`   識別模式：${event.matchedRule.intentClassification}`);
+          lines.push(`   心理分析：${event.matchedRule.psychologyExplanation}`);
+        }
+        lines.push(`   客情變化：${event.scoreBefore} → ${event.scoreAfter} (${event.change})`);
+        lines.push('');
+      });
+    }
   }
 
   return lines.join('\n');
@@ -316,13 +400,13 @@ export function generateRapportSummary(
 export function getInitialRapportScore(customerType: CustomerType): number {
   switch (customerType) {
     case 'neutral':
-      return 50; // 中立態度，標準起點
+      return 50;
     case 'avoidant':
-      return 45; // 迴避態度，稍微低一點
+      return 45;
     case 'skeptical':
-      return 40; // 質疑態度，明顯較低
+      return 40;
     case 'has_insurance':
-      return 45; // 已有保險，有一定防備
+      return 45;
     default:
       return 50;
   }
@@ -333,12 +417,11 @@ export function getInitialRapportScore(customerType: CustomerType): number {
  * 處理一些特殊的多義詞彙
  */
 export function disambiguateTaiwaneseExpression(
-  utterance: string,
-  context?: string
+  utterance: string
 ): {
-  isPoliteOpening: boolean;      // 是否為禮貌性發語詞
-  isRejection: boolean;           // 是否為拒絕
-  isGenuineConsideration: boolean; // 是否為真實考慮
+  isPoliteOpening: boolean;
+  isRejection: boolean;
+  isGenuineConsideration: boolean;
 } {
   const result = {
     isPoliteOpening: false,
@@ -361,11 +444,11 @@ export function disambiguateTaiwaneseExpression(
   // 「考慮」的歧義處理
   if (utterance.includes('考慮')) {
     // 如果包含具體考慮對象，可能是真實考慮
-    if (/考慮.{1,5}(預算|時間|家人|條款|內容)/.test(utterance)) {
+    if (/考慮.{1,5}(預算|時間|家人|條款|內容|方案)/.test(utterance)) {
       result.isGenuineConsideration = true;
     }
     // 如果只說「考慮一下」「再考慮」，通常是軟性拒絕
-    else if (utterance.match(/^.{0,5}(再)?考慮(一下)?$/)) {
+    else if (utterance.match(/^.{0,10}(再)?考慮(一下|看看)?$/)) {
       result.isRejection = true;
     }
   }
